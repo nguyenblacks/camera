@@ -10,6 +10,37 @@ enum AspectRatioMode { ratio4x3, ratio16x9, ratio1x1, full }
 
 enum AntiBandingMode { auto, hz50, hz60, off }
 
+enum VideoQuality { hd, fhd, uhd }
+
+enum CaptureMethod { normal, palm, voice }
+
+enum CameraFilter { none, warm, cool, vivid, noir, sepia, dramatic, cyber, fade }
+
+extension CameraFilterExtension on CameraFilter {
+  String get label {
+    switch (this) {
+      case CameraFilter.none:
+        return 'Original';
+      case CameraFilter.warm:
+        return 'Warm';
+      case CameraFilter.cool:
+        return 'Cool';
+      case CameraFilter.vivid:
+        return 'Vivid';
+      case CameraFilter.noir:
+        return 'B&W';
+      case CameraFilter.sepia:
+        return 'Vintage';
+      case CameraFilter.dramatic:
+        return 'Dramatic';
+      case CameraFilter.cyber:
+        return 'Cyber';
+      case CameraFilter.fade:
+        return 'Film';
+    }
+  }
+}
+
 class CameraSettings {
   CameraMode cameraMode;
   FlashMode flashMode;
@@ -20,46 +51,58 @@ class CameraSettings {
   bool enableShutterSound;
   bool showGrid;
   bool isFrontCamera;
+  bool watermarkEnabled;
+  String? selectedSoundPath;
+  VideoQuality videoQuality;
+  CaptureMethod captureMethod;
+  CameraFilter filter;
 
   CameraSettings({
     this.cameraMode = CameraMode.photo,
     this.flashMode = FlashMode.off,
     this.timerDelay = TimerDelay.off,
-    this.quality = PictureQuality.medium, // Medium (10 frames) default for fast, crisp results
-    this.aspectRatio = AspectRatioMode.ratio4x3, // Default 4:3
+    this.quality = PictureQuality.medium,
+    this.aspectRatio = AspectRatioMode.ratio4x3,
     this.antiBanding = AntiBandingMode.auto,
     this.enableShutterSound = true,
     this.showGrid = false,
     this.isFrontCamera = false,
+    this.watermarkEnabled = false,
+    this.selectedSoundPath,
+    this.videoQuality = VideoQuality.fhd,
+    this.captureMethod = CaptureMethod.normal,
+    this.filter = CameraFilter.none,
   });
 
-  int get frameCount {
-    switch (quality) {
-      case PictureQuality.low:
-        return 1;
-      case PictureQuality.medium:
-        return 10;
-      case PictureQuality.high:
-        return 20;
-      case PictureQuality.veryHigh:
-        return 50;
-      case PictureQuality.ultraHigh:
-        return 100;
-    }
-  }
+  bool get usesTwoFrames => quality != PictureQuality.low;
 
   String get qualityLabel {
     switch (quality) {
       case PictureQuality.low:
-        return 'Low (1 Frame Instant)';
+        return 'Low (1 shot, instant)';
       case PictureQuality.medium:
-        return 'Medium (10 Frames)';
+        return 'Standard (2-shot blend)';
       case PictureQuality.high:
-        return 'High (20 Frames)';
+        return 'High (2-shot + sharp)';
       case PictureQuality.veryHigh:
-        return 'Very High (50 Frames)';
+        return 'Very High (2-shot + deep process)';
       case PictureQuality.ultraHigh:
-        return 'Ultra High (100 Frames)';
+        return 'Ultra (2-shot + max enhance)';
+    }
+  }
+
+  String get qualityShortLabel {
+    switch (quality) {
+      case PictureQuality.low:
+        return 'Low';
+      case PictureQuality.medium:
+        return 'Standard';
+      case PictureQuality.high:
+        return 'High';
+      case PictureQuality.veryHigh:
+        return 'V.High';
+      case PictureQuality.ultraHigh:
+        return 'Ultra';
     }
   }
 
@@ -137,6 +180,17 @@ class CameraSettings {
     }
   }
 
+  String get videoQualityLabel {
+    switch (videoQuality) {
+      case VideoQuality.hd:
+        return 'HD (720p)';
+      case VideoQuality.fhd:
+        return 'Full HD (1080p)';
+      case VideoQuality.uhd:
+        return '4K (2160p)';
+    }
+  }
+
   CameraSettings copyWith({
     CameraMode? cameraMode,
     FlashMode? flashMode,
@@ -147,6 +201,11 @@ class CameraSettings {
     bool? enableShutterSound,
     bool? showGrid,
     bool? isFrontCamera,
+    bool? watermarkEnabled,
+    String? selectedSoundPath,
+    VideoQuality? videoQuality,
+    CaptureMethod? captureMethod,
+    CameraFilter? filter,
   }) {
     return CameraSettings(
       cameraMode: cameraMode ?? this.cameraMode,
@@ -158,6 +217,11 @@ class CameraSettings {
       enableShutterSound: enableShutterSound ?? this.enableShutterSound,
       showGrid: showGrid ?? this.showGrid,
       isFrontCamera: isFrontCamera ?? this.isFrontCamera,
+      watermarkEnabled: watermarkEnabled ?? this.watermarkEnabled,
+      selectedSoundPath: selectedSoundPath ?? this.selectedSoundPath,
+      videoQuality: videoQuality ?? this.videoQuality,
+      captureMethod: captureMethod ?? this.captureMethod,
+      filter: filter ?? this.filter,
     );
   }
 }

@@ -54,11 +54,11 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
             GestureDetector(
               onTap: () => setState(() => _menuOpen = !_menuOpen),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(_flashIcon, color: _flashColor, size: 26),
+                    Icon(_flashIcon, color: _flashColor, size: 24),
                     const SizedBox(width: 4),
                     AnimatedRotation(
                       turns: _menuOpen ? 0.5 : 0,
@@ -77,7 +77,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
               GestureDetector(
                 onTap: widget.onOpenSettings,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   child: const Icon(
                     Icons.settings_outlined,
                     color: Colors.white,
@@ -91,14 +91,16 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
         // Quick dropdown panel
         if (_menuOpen)
           Container(
-            margin: const EdgeInsets.only(left: 12, right: 12, top: 4),
+            margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+            padding: const EdgeInsets.symmetric(vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.black.withAlpha(210),
-              borderRadius: BorderRadius.circular(16),
+              color: Colors.black.withAlpha(220),
+              borderRadius: BorderRadius.circular(20),
               border: Border.all(color: Colors.white.withAlpha(30), width: 0.8),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 _buildSection(
                   label: 'Flash',
@@ -148,11 +150,11 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                   label: 'Quality',
                   child: _buildChipRow<PictureQuality>(
                     items: const [
-                      (PictureQuality.low, 'Low (1)'),
-                      (PictureQuality.medium, 'Med (10)'),
-                      (PictureQuality.high, 'High (20)'),
-                      (PictureQuality.veryHigh, 'V.High (50)'),
-                      (PictureQuality.ultraHigh, 'Ultra (100)'),
+                      (PictureQuality.low, 'Low'),
+                      (PictureQuality.medium, 'Standard'),
+                      (PictureQuality.high, 'High'),
+                      (PictureQuality.veryHigh, 'V.High'),
+                      (PictureQuality.ultraHigh, 'Ultra'),
                     ],
                     selected: widget.settings.quality,
                     onSelected: (v) => widget.onSettingsChanged(
@@ -161,29 +163,28 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                 ),
               ],
             ),
-          ).animate().fadeIn(duration: 180.ms).slideY(begin: -0.1, end: 0),
+          ).animate().fadeIn(duration: 180.ms).slideY(begin: -0.05, end: 0),
       ],
     );
   }
 
   Widget _buildSection({required String label, required Widget child}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
           SizedBox(
-            width: 52,
+            width: 54,
             child: Text(
               label,
               style: const TextStyle(
                 color: Colors.white54,
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: FontWeight.w500,
-                letterSpacing: 0.5,
               ),
             ),
           ),
-          child,
+          Expanded(child: child),
         ],
       ),
     );
@@ -202,6 +203,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
   }) {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: items.map((item) {
@@ -210,13 +212,13 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
             onTap: () => onSelected(item.$1),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              margin: const EdgeInsets.only(right: 6),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              margin: const EdgeInsets.only(right: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
-                color: isSelected ? Colors.white.withAlpha(230) : Colors.white.withAlpha(20),
-                borderRadius: BorderRadius.circular(20),
+                color: isSelected ? Colors.amber : Colors.white.withAlpha(18),
+                borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: isSelected ? Colors.transparent : Colors.white30,
+                  color: isSelected ? Colors.amber : Colors.white24,
                   width: 0.8,
                 ),
               ),
@@ -225,7 +227,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                 style: TextStyle(
                   color: isSelected ? Colors.black : Colors.white,
                   fontSize: 12,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
                 ),
               ),
             ),
