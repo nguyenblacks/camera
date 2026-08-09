@@ -17,9 +17,8 @@ class StackResult {
   });
 }
 
-/// Handles burst frame capture and online pixel stacking.
-/// Frames are accumulated into a running sum (Float64List) so only
-/// ~25 MB of RAM is ever held regardless of how many frames are captured.
+/// Handles burst frame capture and online pixel stacking with safety timeout.
+/// Frames are accumulated into a running sum (Float64List) so memory is kept low.
 class CaptureService {
   Float64List? _accumulator;
   int _frameCount = 0;
@@ -27,12 +26,11 @@ class CaptureService {
   int _height = 0;
   bool _isCapturing = false;
   bool _streamStopped = false;
+  Timer? _timeoutTimer;
 
   /// Capture [targetFrames] from the camera image stream, accumulate online,
   /// and return the averaged pixel data for enhancement.
-  ///
-  /// [onProgress] → (capturedFrames, totalFrames)
-  /// [onFirstFrame] → called once with a raw RGBA Uint8List from frame 1
+  /// Includes a safety timeout (12s max) to prevent UI freezes.
   Future<StackResult?> captureAndStack({
     required CameraController controller,
     required int targetFrames,
@@ -46,44 +44,66 @@ class CaptureService {
 
     final completer = Completer<StackResult?>();
 
-    await controller.startImageStream((CameraImage image) {
-      if (!_isCapturing || _streamStopped) return;
+    void stopStreamAndComplete() async {
+      if (_streamStopped) return;
+      _streamStopped = true;
+      _isCapturing = false;
+      _timeoutTimer?.cancel();
 
-      _accumulateFrame(image);
-      onProgress(_frameCount, targetFrames);
-
-      // Hand off first frame raw RGBA for thumbnail preview
-      if (_frameCount == 1) {
-        _extractFirstFrameRgba(image).then((rgba) {
-          if (rgba != null) onFirstFrame(rgba, image.width, image.height);
-        });
+      try {
+        await controller.stopImageStream();
+      } catch (e) {
+        debugPrint('stopImageStream error (safely handled): $e');
       }
 
-      if (_frameCount >= targetFrames) {
-        if (!_streamStopped) {
-          _streamStopped = true;
-          _isCapturing = false;
-          controller.stopImageStream().then((_) {
-            completer.complete(StackResult(
-              accumulator: Float64List.fromList(_accumulator!),
-              frameCount: _frameCount,
-              width: _width,
-              height: _height,
-            ));
-          }).catchError((_) {
-            completer.complete(null);
+      if (_frameCount > 0 && _accumulator != null && !completer.isCompleted) {
+        completer.complete(StackResult(
+          accumulator: Float64List.fromList(_accumulator!),
+          frameCount: _frameCount,
+          width: _width,
+          height: _height,
+        ));
+      } else if (!completer.isCompleted) {
+        completer.complete(null);
+      }
+    }
+
+    // Safety timeout: stop after 15s if stream callback stalls
+    _timeoutTimer = Timer(const Duration(seconds: 15), () {
+      debugPrint('CaptureService timeout safety triggered.');
+      stopStreamAndComplete();
+    });
+
+    try {
+      await controller.startImageStream((CameraImage image) {
+        if (!_isCapturing || _streamStopped) return;
+
+        _accumulateFrame(image);
+        onProgress(_frameCount, targetFrames);
+
+        // Hand off first frame raw RGBA for thumbnail preview
+        if (_frameCount == 1) {
+          _extractFirstFrameRgba(image).then((rgba) {
+            if (rgba != null) onFirstFrame(rgba, image.width, image.height);
           });
         }
-      }
-    });
+
+        if (_frameCount >= targetFrames) {
+          stopStreamAndComplete();
+        }
+      });
+    } catch (e) {
+      debugPrint('startImageStream exception: $e');
+      stopStreamAndComplete();
+    }
 
     return completer.future;
   }
 
-
   void cancel() {
     _isCapturing = false;
     _streamStopped = true;
+    _timeoutTimer?.cancel();
   }
 
   // ── Private ────────────────────────────────────────────────────────────
@@ -104,6 +124,7 @@ class CaptureService {
     final int uvPixelStride = uPlane.bytesPerPixel ?? 2;
     final int uvRowStride = uPlane.bytesPerRow;
 
+    // Process pixels with step size of 1 for 100% detail accuracy
     for (int row = 0; row < h; row++) {
       final int yRowOffset = row * yPlane.bytesPerRow;
       final int uvRowOffset = (row >> 1) * uvRowStride;

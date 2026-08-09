@@ -1,36 +1,65 @@
 import 'package:camera/camera.dart';
 
-enum BurstCount { frames30, frames100, frames300 }
+enum CameraMode { photo, video }
+
+enum PictureQuality { low, medium, high, veryHigh, ultraHigh }
 
 enum TimerDelay { off, three, ten }
 
-enum AspectRatioMode { ratio4x3, ratio16x9, ratio1x1 }
+enum AspectRatioMode { ratio4x3, ratio16x9, ratio1x1, full }
+
+enum AntiBandingMode { auto, hz50, hz60, off }
 
 class CameraSettings {
+  CameraMode cameraMode;
   FlashMode flashMode;
   TimerDelay timerDelay;
-  BurstCount burstCount;
+  PictureQuality quality;
   AspectRatioMode aspectRatio;
+  AntiBandingMode antiBanding;
+  bool enableShutterSound;
   bool showGrid;
   bool isFrontCamera;
 
   CameraSettings({
+    this.cameraMode = CameraMode.photo,
     this.flashMode = FlashMode.off,
     this.timerDelay = TimerDelay.off,
-    this.burstCount = BurstCount.frames300,
-    this.aspectRatio = AspectRatioMode.ratio4x3,
+    this.quality = PictureQuality.medium, // Medium (10 frames) default for fast, crisp results
+    this.aspectRatio = AspectRatioMode.ratio4x3, // Default 4:3
+    this.antiBanding = AntiBandingMode.auto,
+    this.enableShutterSound = true,
     this.showGrid = false,
     this.isFrontCamera = false,
   });
 
   int get frameCount {
-    switch (burstCount) {
-      case BurstCount.frames30:
-        return 30;
-      case BurstCount.frames100:
+    switch (quality) {
+      case PictureQuality.low:
+        return 1;
+      case PictureQuality.medium:
+        return 10;
+      case PictureQuality.high:
+        return 20;
+      case PictureQuality.veryHigh:
+        return 50;
+      case PictureQuality.ultraHigh:
         return 100;
-      case BurstCount.frames300:
-        return 300;
+    }
+  }
+
+  String get qualityLabel {
+    switch (quality) {
+      case PictureQuality.low:
+        return 'Low (1 Frame Instant)';
+      case PictureQuality.medium:
+        return 'Medium (10 Frames)';
+      case PictureQuality.high:
+        return 'High (20 Frames)';
+      case PictureQuality.veryHigh:
+        return 'Very High (50 Frames)';
+      case PictureQuality.ultraHigh:
+        return 'Ultra High (100 Frames)';
     }
   }
 
@@ -42,6 +71,19 @@ class CameraSettings {
         return 3;
       case TimerDelay.ten:
         return 10;
+    }
+  }
+
+  double? get aspectRatioRatio {
+    switch (aspectRatio) {
+      case AspectRatioMode.ratio4x3:
+        return 3.0 / 4.0;
+      case AspectRatioMode.ratio16x9:
+        return 9.0 / 16.0;
+      case AspectRatioMode.ratio1x1:
+        return 1.0;
+      case AspectRatioMode.full:
+        return null;
     }
   }
 
@@ -69,17 +111,6 @@ class CameraSettings {
     }
   }
 
-  String get burstLabel {
-    switch (burstCount) {
-      case BurstCount.frames30:
-        return '30';
-      case BurstCount.frames100:
-        return '100';
-      case BurstCount.frames300:
-        return '300';
-    }
-  }
-
   String get aspectLabel {
     switch (aspectRatio) {
       case AspectRatioMode.ratio4x3:
@@ -88,22 +119,43 @@ class CameraSettings {
         return '16:9';
       case AspectRatioMode.ratio1x1:
         return '1:1';
+      case AspectRatioMode.full:
+        return 'Full';
+    }
+  }
+
+  String get antiBandingLabel {
+    switch (antiBanding) {
+      case AntiBandingMode.auto:
+        return 'Auto';
+      case AntiBandingMode.hz50:
+        return '50Hz';
+      case AntiBandingMode.hz60:
+        return '60Hz';
+      case AntiBandingMode.off:
+        return 'Off';
     }
   }
 
   CameraSettings copyWith({
+    CameraMode? cameraMode,
     FlashMode? flashMode,
     TimerDelay? timerDelay,
-    BurstCount? burstCount,
+    PictureQuality? quality,
     AspectRatioMode? aspectRatio,
+    AntiBandingMode? antiBanding,
+    bool? enableShutterSound,
     bool? showGrid,
     bool? isFrontCamera,
   }) {
     return CameraSettings(
+      cameraMode: cameraMode ?? this.cameraMode,
       flashMode: flashMode ?? this.flashMode,
       timerDelay: timerDelay ?? this.timerDelay,
-      burstCount: burstCount ?? this.burstCount,
+      quality: quality ?? this.quality,
       aspectRatio: aspectRatio ?? this.aspectRatio,
+      antiBanding: antiBanding ?? this.antiBanding,
+      enableShutterSound: enableShutterSound ?? this.enableShutterSound,
       showGrid: showGrid ?? this.showGrid,
       isFrontCamera: isFrontCamera ?? this.isFrontCamera,
     );

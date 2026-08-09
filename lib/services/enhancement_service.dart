@@ -103,8 +103,11 @@ Uint8List? _enhancePipeline(_EnhanceParams p) {
 
 /// Single JPEG enhancement pipeline (runs in isolate).
 Uint8List? _enhanceSingleJpeg(Uint8List jpegBytes) {
-  final image = img.decodeJpg(jpegBytes);
-  if (image == null) return null;
+  final decoded = img.decodeJpg(jpegBytes);
+  if (decoded == null) return null;
+
+  // Bake EXIF orientation so portrait photos are right-side-up and sharp
+  final image = img.bakeOrientation(decoded);
 
   final enhanced = _applyWarmthAndSuperClarity(image);
   final leveled = _autoLevels(enhanced);

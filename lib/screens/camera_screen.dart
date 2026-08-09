@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:gal/gal.dart';
@@ -13,10 +12,12 @@ import '../models/camera_settings.dart';
 import '../services/capture_service.dart';
 import '../services/enhancement_service.dart';
 import '../services/native_capture_service.dart';
+import '../services/sound_service.dart';
 import '../widgets/shutter_button.dart';
 import '../widgets/thumbnail_widget.dart';
 import '../widgets/top_menu_widget.dart';
 import 'preview_screen.dart';
+import 'settings_screen.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -35,6 +36,11 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isInitialized = false;
   bool _isProcessing = false;
   bool _permissionDenied = false;
+
+  // Video recording state
+  bool _isRecordingVideo = false;
+  int _videoRecordSeconds = 0;
+  Timer? _videoRecordTimer;
 
   // Thumbnail state
   Uint8List? _thumbnailBytes;
@@ -61,6 +67,7 @@ class _CameraScreenState extends State<CameraScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _countdownTimer?.cancel();
+    _videoRecordTimer?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -76,9 +83,10 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _initCamera() async {
-    // Request permissions
     final cameraStatus = await Permission.camera.request();
-    if (!cameraStatus.isGranted) {
+    final micStatus = await Permission.microphone.request();
+
+    if (!cameraStatus.isGranted || !micStatus.isGranted) {
       setState(() => _permissionDenied = true);
       return;
     }
@@ -103,15 +111,14 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (e) {
       debugPrint('Camera init error: $e');
     }
-
   }
 
   Future<void> _setupController(CameraDescription camera) async {
     final prev = _controller;
     final newController = CameraController(
       camera,
-      ResolutionPreset.medium,
-      enableAudio: false,
+      ResolutionPreset.high,
+      enableAudio: true,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
@@ -132,13 +139,21 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  // ── Shutter Action Entry Point ─────────────────────────────────────────────
+
   Future<void> _onShutterPressed() async {
     if (_isProcessing || _controller == null) return;
 
-    // Handle countdown timer
+    if (_settings.cameraMode == CameraMode.video) {
+      _toggleVideoRecording();
+      return;
+    }
+
+    // Photo mode countdown timer check
     if (_settings.timerSeconds > 0) {
       setState(() => _countdownValue = _settings.timerSeconds);
       _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) return;
         setState(() => _countdownValue--);
         if (_countdownValue <= 0) {
           t.cancel();
@@ -151,6 +166,8 @@ class _CameraScreenState extends State<CameraScreen>
     _startCapture();
   }
 
+  // ── Photo Capture Pipeline ────────────────────────────────────────────────
+
   Future<void> _startCapture() async {
     if (_controller == null || _isProcessing) return;
 
@@ -161,54 +178,78 @@ class _CameraScreenState extends State<CameraScreen>
       _thumbnailState = ThumbnailState.idle;
     });
 
+    if (_settings.enableShutterSound) {
+      SoundService.playShutterSound();
+    }
     HapticFeedback.heavyImpact();
 
     try {
-      final result = await _captureService.captureAndStack(
-        controller: _controller!,
-        targetFrames: _settings.frameCount,
-        onProgress: (captured, total) {
-          if (mounted) {
-            setState(() {
-              _capturedFrames = captured;
-              _totalFrames = total;
-            });
-          }
-        },
-        onFirstFrame: (rgba, w, h) {
-          // Encode RGBA → JPEG in background then show in thumbnail
-          EnhancementService.encodeRgbaToJpeg(rgba, w, h).then((jpeg) {
-            if (jpeg != null && mounted) {
+      Uint8List? finalJpeg;
+
+      if (_settings.quality == PictureQuality.low) {
+        // Single 100% hardware ISP capture (Instant, Sharp & Crystal Clear)
+        final XFile file = await _controller!.takePicture();
+        final rawBytes = await file.readAsBytes();
+
+        if (mounted) {
+          setState(() {
+            _thumbnailBytes = rawBytes;
+            _thumbnailState = ThumbnailState.processing;
+          });
+        }
+
+        // Apply warmth balance + super clarity sharpening + EXIF orientation baking
+        finalJpeg = await EnhancementService.enhanceSingleFrame(rawBytes);
+        try {
+          File(file.path).delete();
+        } catch (_) {}
+      } else {
+        // Multi-frame burst stack capture
+        final result = await _captureService.captureAndStack(
+          controller: _controller!,
+          targetFrames: _settings.frameCount,
+          onProgress: (captured, total) {
+            if (mounted) {
               setState(() {
-                _thumbnailBytes = jpeg;
-                _thumbnailState = ThumbnailState.processing;
+                _capturedFrames = captured;
+                _totalFrames = total;
               });
             }
-          });
-        },
-      );
+          },
+          onFirstFrame: (rgba, w, h) {
+            EnhancementService.encodeRgbaToJpeg(rgba, w, h).then((jpeg) {
+              if (jpeg != null && mounted) {
+                setState(() {
+                  _thumbnailBytes = jpeg;
+                  _thumbnailState = ThumbnailState.processing;
+                });
+              }
+            });
+          },
+        );
 
-      if (result == null) {
-        _finishProcessing(null);
-        return;
+        if (result != null) {
+          finalJpeg = await EnhancementService.process(
+            accumulator: result.accumulator,
+            frameCount: result.frameCount,
+            width: result.width,
+            height: result.height,
+          );
+        }
       }
 
-      // Run enhancement in isolate
-      final enhanced = await EnhancementService.process(
-        accumulator: result.accumulator,
-        frameCount: result.frameCount,
-        width: result.width,
-        height: result.height,
-      );
-
-      if (enhanced != null) {
-        await _saveToGallery(enhanced);
+      if (finalJpeg != null) {
+        await _saveToGallery(finalJpeg);
       }
 
-      _finishProcessing(enhanced);
+      _finishProcessing(finalJpeg);
     } catch (e) {
       debugPrint('Capture error: $e');
       _finishProcessing(null);
+    } finally {
+      if (mounted) {
+        setState(() => _isProcessing = false);
+      }
     }
   }
 
@@ -236,14 +277,75 @@ class _CameraScreenState extends State<CameraScreen>
       _capturedFrames = 0;
     });
 
-    // Revert thumbnail state to idle after a moment
     Future.delayed(const Duration(milliseconds: 800), () {
       if (mounted) setState(() => _thumbnailState = ThumbnailState.idle);
     });
   }
 
+  // ── Video Recording Pipeline ──────────────────────────────────────────────
+
+  Future<void> _toggleVideoRecording() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+
+    if (_isRecordingVideo) {
+      // Stop recording
+      try {
+        final XFile videoFile = await _controller!.stopVideoRecording();
+        _videoRecordTimer?.cancel();
+
+        setState(() {
+          _isRecordingVideo = false;
+          _videoRecordSeconds = 0;
+        });
+
+        // Save to gallery
+        await Gal.putVideo(videoFile.path, album: 'Swavoti Camera');
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Video saved to Gallery'),
+              backgroundColor: Color(0xFF222222),
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        debugPrint('Stop video error: $e');
+        setState(() {
+          _isRecordingVideo = false;
+          _videoRecordSeconds = 0;
+        });
+      }
+    } else {
+      // Start recording
+      try {
+        await _controller!.startVideoRecording();
+        HapticFeedback.mediumImpact();
+        if (_settings.enableShutterSound) {
+          SoundService.playShutterSound();
+        }
+
+        setState(() {
+          _isRecordingVideo = true;
+          _videoRecordSeconds = 0;
+        });
+
+        _videoRecordTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+          if (!mounted) return;
+          setState(() => _videoRecordSeconds++);
+        });
+      } catch (e) {
+        debugPrint('Start video error: $e');
+      }
+    }
+  }
+
+  // ── Settings & Flip Logic ──────────────────────────────────────────────────
+
   Future<void> _flipCamera() async {
-    if (_isProcessing || _cameras.length < 2) return;
+    if (_isProcessing || _isRecordingVideo || _cameras.length < 2) return;
     final newSettings = _settings.copyWith(isFrontCamera: !_settings.isFrontCamera);
     setState(() => _settings = newSettings);
 
@@ -266,6 +368,20 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  void _openSettingsScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          settings: _settings,
+          onSettingsChanged: _onSettingsChanged,
+        ),
+      ),
+    );
+  }
+
+  // ── Build Method ───────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     if (_permissionDenied) return _buildPermissionDenied();
@@ -274,14 +390,18 @@ class _CameraScreenState extends State<CameraScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
+        alignment: Alignment.center,
         children: [
-          // ── Camera preview ────────────────────────────────────────────
-          _buildPreview(),
+          // ── Camera preview with aspect ratio letterboxing ──────────────
+          _buildPreviewWithAspectRatio(),
 
           // ── Grid overlay ─────────────────────────────────────────────
           if (_settings.showGrid) _buildGrid(),
 
-          // ── Countdown overlay ─────────────────────────────────────────
+          // ── Video recording duration timer indicator ──────────────────
+          if (_isRecordingVideo) _buildVideoTimer(),
+
+          // ── Photo countdown overlay ───────────────────────────────────
           if (_countdownValue > 0) _buildCountdown(),
 
           // ── Processing progress bar ───────────────────────────────────
@@ -297,14 +417,63 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Sub-builders ─────────────────────────────────────────────────────────
 
-  Widget _buildPreview() {
-    return SizedBox.expand(
-      child: FittedBox(
-        fit: BoxFit.cover,
-        child: SizedBox(
-          width: _controller!.value.previewSize!.height,
-          height: _controller!.value.previewSize!.width,
-          child: CameraPreview(_controller!),
+  Widget _buildPreviewWithAspectRatio() {
+    final double? targetRatio = _settings.aspectRatioRatio;
+
+    Widget previewWidget = FittedBox(
+      fit: BoxFit.cover,
+      child: SizedBox(
+        width: _controller!.value.previewSize!.height,
+        height: _controller!.value.previewSize!.width,
+        child: CameraPreview(_controller!),
+      ),
+    );
+
+    if (targetRatio != null) {
+      return Center(
+        child: AspectRatio(
+          aspectRatio: targetRatio,
+          child: ClipRect(child: previewWidget),
+        ),
+      );
+    }
+
+    return SizedBox.expand(child: previewWidget);
+  }
+
+  Widget _buildVideoTimer() {
+    final mins = (_videoRecordSeconds ~/ 60).toString().padLeft(2, '0');
+    final secs = (_videoRecordSeconds % 60).toString().padLeft(2, '0');
+
+    return Positioned(
+      top: 60,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.red.withAlpha(200),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white,
+              ),
+            ).animate(onPlay: (c) => c.repeat(reverse: true)).fade(duration: 500.ms),
+            const SizedBox(width: 8),
+            Text(
+              '$mins:$secs',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -347,8 +516,8 @@ class _CameraScreenState extends State<CameraScreen>
       child: LinearProgressIndicator(
         value: pct,
         backgroundColor: Colors.white12,
-        valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-        minHeight: 2,
+        valueColor: const AlwaysStoppedAnimation<Color>(Colors.amber),
+        minHeight: 3,
       ),
     );
   }
@@ -356,16 +525,19 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildControls() {
     return Column(
       children: [
-        // ── Top bar: flash + menu (top-left) ─────────────────────────
-        Align(
-          alignment: Alignment.topLeft,
-          child: TopMenuWidget(
-            settings: _settings,
-            onSettingsChanged: _onSettingsChanged,
-          ),
+        // ── Top bar: flash + menu + gear ──────────────────────────────
+        TopMenuWidget(
+          settings: _settings,
+          onSettingsChanged: _onSettingsChanged,
+          onOpenSettings: _openSettingsScreen,
         ),
 
         const Spacer(),
+
+        // ── Photo / Video mode selector ────────────────────────────────
+        _buildModeSelector(),
+
+        const SizedBox(height: 16),
 
         // ── Bottom bar ────────────────────────────────────────────────
         Padding(
@@ -377,10 +549,12 @@ class _CameraScreenState extends State<CameraScreen>
               // Flip camera (left)
               _buildFlipButton(),
 
-              // Shutter (center)
+              // Shutter button (center)
               ShutterButton(
                 onPressed: _isProcessing ? null : _onShutterPressed,
                 isProcessing: _isProcessing,
+                isVideoMode: _settings.cameraMode == CameraMode.video,
+                isRecording: _isRecordingVideo,
               ),
 
               // Thumbnail (right)
@@ -405,9 +579,53 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  Widget _buildModeSelector() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black45,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildModeChip(CameraMode.photo, 'PHOTO'),
+          _buildModeChip(CameraMode.video, 'VIDEO'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeChip(CameraMode mode, String label) {
+    final isSelected = _settings.cameraMode == mode;
+    return GestureDetector(
+      onTap: _isProcessing || _isRecordingVideo
+          ? null
+          : () => _onSettingsChanged(_settings.copyWith(cameraMode: mode)),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.amber : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.black : Colors.white70,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildFlipButton() {
     return GestureDetector(
-      onTap: _isProcessing ? null : _flipCamera,
+      onTap: _isProcessing || _isRecordingVideo ? null : _flipCamera,
       child: Container(
         width: 56,
         height: 56,
@@ -429,7 +647,7 @@ class _CameraScreenState extends State<CameraScreen>
       backgroundColor: Colors.black,
       body: Center(
         child: CircularProgressIndicator(
-          color: Colors.white,
+          color: Colors.amber,
           strokeWidth: 1.5,
         ),
       ),
@@ -446,14 +664,14 @@ class _CameraScreenState extends State<CameraScreen>
             const Icon(Icons.camera_alt_outlined, color: Colors.white38, size: 56),
             const SizedBox(height: 16),
             const Text(
-              'Camera permission required',
+              'Camera & Microphone permissions required',
               style: TextStyle(color: Colors.white70, fontSize: 16),
             ),
             const SizedBox(height: 20),
             TextButton(
               onPressed: openAppSettings,
               child: const Text('Open Settings',
-                  style: TextStyle(color: Colors.white)),
+                  style: TextStyle(color: Colors.amber)),
             ),
           ],
         ),
@@ -471,7 +689,6 @@ class _GridPainter extends CustomPainter {
       ..color = Colors.white.withAlpha(50)
       ..strokeWidth = 0.8;
 
-    // 2 vertical lines, 2 horizontal lines (rule of thirds)
     for (int i = 1; i <= 2; i++) {
       final x = size.width * i / 3;
       canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);

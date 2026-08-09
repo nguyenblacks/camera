@@ -7,11 +7,13 @@ import '../theme/app_theme.dart';
 class TopMenuWidget extends StatefulWidget {
   final CameraSettings settings;
   final ValueChanged<CameraSettings> onSettingsChanged;
+  final VoidCallback? onOpenSettings;
 
   const TopMenuWidget({
     super.key,
     required this.settings,
     required this.onSettingsChanged,
+    this.onOpenSettings,
   });
 
   @override
@@ -45,34 +47,51 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Flash icon + chevron row
-        GestureDetector(
-          onTap: () => setState(() => _menuOpen = !_menuOpen),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(_flashIcon, color: _flashColor, size: 26),
-                const SizedBox(width: 4),
-                AnimatedRotation(
-                  turns: _menuOpen ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 200),
+        // Top bar row: Flash icon + chevron (left) AND Settings gear (right)
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            GestureDetector(
+              onTap: () => setState(() => _menuOpen = !_menuOpen),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_flashIcon, color: _flashColor, size: 26),
+                    const SizedBox(width: 4),
+                    AnimatedRotation(
+                      turns: _menuOpen ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: Colors.white70,
+                        size: 20,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (widget.onOpenSettings != null)
+              GestureDetector(
+                onTap: widget.onOpenSettings,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   child: const Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: Colors.white70,
-                    size: 20,
+                    Icons.settings_outlined,
+                    color: Colors.white,
+                    size: 24,
                   ),
                 ),
-              ],
-            ),
-          ),
+              ),
+          ],
         ),
 
-        // Dropdown panel
+        // Quick dropdown panel
         if (_menuOpen)
           Container(
-            margin: const EdgeInsets.only(left: 8),
+            margin: const EdgeInsets.only(left: 12, right: 12, top: 4),
             decoration: BoxDecoration(
               color: Colors.black.withAlpha(210),
               borderRadius: BorderRadius.circular(16),
@@ -117,6 +136,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                       (AspectRatioMode.ratio4x3, '4:3'),
                       (AspectRatioMode.ratio16x9, '16:9'),
                       (AspectRatioMode.ratio1x1, '1:1'),
+                      (AspectRatioMode.full, 'Full'),
                     ],
                     selected: widget.settings.aspectRatio,
                     onSelected: (v) => widget.onSettingsChanged(
@@ -125,44 +145,18 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                 ),
                 _buildDivider(),
                 _buildSection(
-                  label: 'Frames',
-                  child: _buildChipRow<BurstCount>(
+                  label: 'Quality',
+                  child: _buildChipRow<PictureQuality>(
                     items: const [
-                      (BurstCount.frames30, '30'),
-                      (BurstCount.frames100, '100'),
-                      (BurstCount.frames300, '300'),
+                      (PictureQuality.low, 'Low (1)'),
+                      (PictureQuality.medium, 'Med (10)'),
+                      (PictureQuality.high, 'High (20)'),
+                      (PictureQuality.veryHigh, 'V.High (50)'),
+                      (PictureQuality.ultraHigh, 'Ultra (100)'),
                     ],
-                    selected: widget.settings.burstCount,
+                    selected: widget.settings.quality,
                     onSelected: (v) => widget.onSettingsChanged(
-                        widget.settings.copyWith(burstCount: v)),
-                  ),
-                ),
-                _buildDivider(),
-                _buildSection(
-                  label: 'Grid',
-                  child: GestureDetector(
-                    onTap: () => widget.onSettingsChanged(
-                        widget.settings.copyWith(showGrid: !widget.settings.showGrid)),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: widget.settings.showGrid
-                            ? Colors.white.withAlpha(230)
-                            : Colors.white.withAlpha(20),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.white30),
-                      ),
-                      child: Text(
-                        widget.settings.showGrid ? 'On' : 'Off',
-                        style: TextStyle(
-                          color: widget.settings.showGrid
-                              ? Colors.black
-                              : Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
+                        widget.settings.copyWith(quality: v)),
                   ),
                 ),
               ],
@@ -206,35 +200,38 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
     required T selected,
     required ValueChanged<T> onSelected,
   }) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: items.map((item) {
-        final isSelected = item.$1 == selected;
-        return GestureDetector(
-          onTap: () => onSelected(item.$1),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            margin: const EdgeInsets.only(right: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: isSelected ? Colors.white.withAlpha(230) : Colors.white.withAlpha(20),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: isSelected ? Colors.transparent : Colors.white30,
-                width: 0.8,
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: items.map((item) {
+          final isSelected = item.$1 == selected;
+          return GestureDetector(
+            onTap: () => onSelected(item.$1),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              margin: const EdgeInsets.only(right: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.white.withAlpha(230) : Colors.white.withAlpha(20),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: isSelected ? Colors.transparent : Colors.white30,
+                  width: 0.8,
+                ),
+              ),
+              child: Text(
+                item.$2,
+                style: TextStyle(
+                  color: isSelected ? Colors.black : Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            child: Text(
-              item.$2,
-              style: TextStyle(
-                color: isSelected ? Colors.black : Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        );
-      }).toList(),
+          );
+        }).toList(),
+      ),
     );
   }
 }

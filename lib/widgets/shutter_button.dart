@@ -5,11 +5,15 @@ import 'package:flutter_animate/flutter_animate.dart';
 class ShutterButton extends StatefulWidget {
   final VoidCallback? onPressed;
   final bool isProcessing;
+  final bool isVideoMode;
+  final bool isRecording;
 
   const ShutterButton({
     super.key,
     required this.onPressed,
     this.isProcessing = false,
+    this.isVideoMode = false,
+    this.isRecording = false,
   });
 
   @override
@@ -61,6 +65,10 @@ class _ShutterButtonState extends State<ShutterButton>
 
   @override
   Widget build(BuildContext context) {
+    final Color buttonColor = widget.isVideoMode
+        ? (widget.isRecording ? Colors.red : Colors.redAccent)
+        : (widget.isProcessing ? Colors.white.withAlpha(100) : Colors.white);
+
     return GestureDetector(
       onTapDown: _onTapDown,
       onTapUp: _onTapUp,
@@ -86,21 +94,23 @@ class _ShutterButtonState extends State<ShutterButton>
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: Colors.white.withAlpha(200),
+                    color: widget.isRecording
+                        ? Colors.red.withAlpha(200)
+                        : Colors.white.withAlpha(200),
                     width: 3,
                   ),
                 ),
               ),
-              // Inner filled circle
+              // Inner filled shape (circle in photo/idle, rounded square when recording)
               AnimatedContainer(
-                duration: const Duration(milliseconds: 100),
-                width: _isPressed ? 60 : 66,
-                height: _isPressed ? 60 : 66,
+                duration: const Duration(milliseconds: 150),
+                width: widget.isRecording ? 32 : (_isPressed ? 60 : 66),
+                height: widget.isRecording ? 32 : (_isPressed ? 60 : 66),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: widget.isProcessing
-                      ? Colors.white.withAlpha(100)
-                      : Colors.white,
+                  borderRadius: widget.isRecording
+                      ? BorderRadius.circular(8)
+                      : BorderRadius.circular(40),
+                  color: buttonColor,
                 ),
               ),
             ],

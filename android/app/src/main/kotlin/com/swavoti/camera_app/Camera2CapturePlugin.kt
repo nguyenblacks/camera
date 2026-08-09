@@ -57,6 +57,14 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
                 val cameraId = call.argument<String>("cameraId") ?: "0"
                 captureHighQuality(cameraId, result)
             }
+            "playShutterSound" -> {
+                try {
+                    android.media.MediaActionSound().play(android.media.MediaActionSound.SHUTTER_CLICK)
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
             else -> result.notImplemented()
         }
     }
