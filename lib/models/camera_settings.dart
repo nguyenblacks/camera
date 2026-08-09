@@ -1,6 +1,6 @@
 import 'package:camera/camera.dart';
 
-enum CameraMode { photo, video }
+enum CameraMode { photo, portrait, video, night, timelapse }
 
 enum PictureQuality { low, medium, high, veryHigh, ultraHigh }
 
@@ -12,34 +12,9 @@ enum AntiBandingMode { auto, hz50, hz60, off }
 
 enum VideoQuality { hd, fhd, uhd }
 
-enum CaptureMethod { normal, palm, voice }
+enum CaptureMethod { normal, voice }
 
-enum CameraFilter { none, warm, cool, vivid, noir, sepia, dramatic, cyber, fade }
-
-extension CameraFilterExtension on CameraFilter {
-  String get label {
-    switch (this) {
-      case CameraFilter.none:
-        return 'Original';
-      case CameraFilter.warm:
-        return 'Warm';
-      case CameraFilter.cool:
-        return 'Cool';
-      case CameraFilter.vivid:
-        return 'Vivid';
-      case CameraFilter.noir:
-        return 'B&W';
-      case CameraFilter.sepia:
-        return 'Vintage';
-      case CameraFilter.dramatic:
-        return 'Dramatic';
-      case CameraFilter.cyber:
-        return 'Cyber';
-      case CameraFilter.fade:
-        return 'Film';
-    }
-  }
-}
+enum HdrMode { auto, on, off }
 
 class CameraSettings {
   CameraMode cameraMode;
@@ -55,7 +30,11 @@ class CameraSettings {
   String? selectedSoundPath;
   VideoQuality videoQuality;
   CaptureMethod captureMethod;
-  CameraFilter filter;
+  int timelapseIntervalSeconds;
+  HdrMode hdrMode;
+  bool saveLocationInfo;
+  double bokehBlurLevel; // 0.0 (no blur) to 1.0 (max blur f/1.4)
+  String bokehFStop;     // 'f/1.4', 'f/2.0', 'f/2.8', 'f/4.0', 'f/8.0'
 
   CameraSettings({
     this.cameraMode = CameraMode.photo,
@@ -71,7 +50,11 @@ class CameraSettings {
     this.selectedSoundPath,
     this.videoQuality = VideoQuality.fhd,
     this.captureMethod = CaptureMethod.normal,
-    this.filter = CameraFilter.none,
+    this.timelapseIntervalSeconds = 2,
+    this.hdrMode = HdrMode.auto,
+    this.saveLocationInfo = false,
+    this.bokehBlurLevel = 0.6,
+    this.bokehFStop = 'f/2.8',
   });
 
   bool get usesTwoFrames => quality != PictureQuality.low;
@@ -180,6 +163,17 @@ class CameraSettings {
     }
   }
 
+  String get hdrLabel {
+    switch (hdrMode) {
+      case HdrMode.auto:
+        return 'HDR Auto';
+      case HdrMode.on:
+        return 'HDR On';
+      case HdrMode.off:
+        return 'HDR Off';
+    }
+  }
+
   String get videoQualityLabel {
     switch (videoQuality) {
       case VideoQuality.hd:
@@ -205,7 +199,11 @@ class CameraSettings {
     String? selectedSoundPath,
     VideoQuality? videoQuality,
     CaptureMethod? captureMethod,
-    CameraFilter? filter,
+    int? timelapseIntervalSeconds,
+    HdrMode? hdrMode,
+    bool? saveLocationInfo,
+    double? bokehBlurLevel,
+    String? bokehFStop,
   }) {
     return CameraSettings(
       cameraMode: cameraMode ?? this.cameraMode,
@@ -221,7 +219,12 @@ class CameraSettings {
       selectedSoundPath: selectedSoundPath ?? this.selectedSoundPath,
       videoQuality: videoQuality ?? this.videoQuality,
       captureMethod: captureMethod ?? this.captureMethod,
-      filter: filter ?? this.filter,
+      timelapseIntervalSeconds:
+          timelapseIntervalSeconds ?? this.timelapseIntervalSeconds,
+      hdrMode: hdrMode ?? this.hdrMode,
+      saveLocationInfo: saveLocationInfo ?? this.saveLocationInfo,
+      bokehBlurLevel: bokehBlurLevel ?? this.bokehBlurLevel,
+      bokehFStop: bokehFStop ?? this.bokehFStop,
     );
   }
 }

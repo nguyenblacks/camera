@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:gal/gal.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -12,12 +13,17 @@ import 'package:permission_handler/permission_handler.dart';
 import '../models/camera_settings.dart';
 import '../services/device_info_service.dart';
 import '../services/enhancement_service.dart';
+import '../services/face_detection_service.dart';
 import '../services/native_capture_service.dart';
+import '../services/night_service.dart';
+import '../services/portrait_service.dart';
 import '../services/sound_service.dart';
+import '../services/timelapse_service.dart';
 import '../services/voice_capture_service.dart';
 import '../widgets/shutter_button.dart';
 import '../widgets/thumbnail_widget.dart';
 import '../widgets/top_menu_widget.dart';
+import '../widgets/zoom_control_widget.dart';
 import 'settings_screen.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -42,6 +48,18 @@ class _CameraScreenState extends State<CameraScreen>
   int _videoRecordSeconds = 0;
   Timer? _videoRecordTimer;
 
+  // Night Sight state
+  bool _isCapturingNight = false;
+  int _nightFrameCount = 0;
+
+  // Timelapse state
+  final TimelapseService _timelapseService = TimelapseService();
+  TimelapseState _timelapseState = const TimelapseState(
+    isRecording: false,
+    capturedFrames: 0,
+    elapsedSeconds: 0,
+  );
+
   // Thumbnail state
   Uint8List? _thumbnailBytes;
   ThumbnailState _thumbnailState = ThumbnailState.idle;
@@ -51,13 +69,6 @@ class _CameraScreenState extends State<CameraScreen>
   int _countdownValue = 0;
   Timer? _countdownTimer;
 
-  // Palm shutter state
-  bool _palmStreamActive = false;
-  bool _palmDetected = false;
-  int _palmCountdown = 0;
-  Timer? _palmCountdownTimer;
-  int _palmFrameSkip = 0;
-
   // Voice shutter
   final VoiceCaptureService _voiceService = VoiceCaptureService();
   bool _voiceListening = false;
@@ -65,8 +76,19 @@ class _CameraScreenState extends State<CameraScreen>
   // Device info
   String _deviceModel = '';
 
-  // Filter carousel overlay toggle
-  bool _showFilterCarousel = false;
+  // ── Zoom state ──────────────────────────────────────────────────────────
+  double _currentZoom = 1.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  bool _hasUltraWide = false;
+
+  // Hardware video capabilities state
+  String _videoCapsText = '';
+  HardwareVideoCaps? _activeVideoCaps;
+
+  // ── Face detection state ────────────────────────────────────────────────
+  final FaceDetectionService _faceService = FaceDetectionService();
+  bool _isFaceStreamActive = false;
 
   @override
   void initState() {
@@ -83,8 +105,8 @@ class _CameraScreenState extends State<CameraScreen>
     WidgetsBinding.instance.removeObserver(this);
     _countdownTimer?.cancel();
     _videoRecordTimer?.cancel();
-    _palmCountdownTimer?.cancel();
     _voiceService.dispose();
+    _faceService.dispose();
     _controller?.dispose();
     super.dispose();
   }
@@ -92,8 +114,11 @@ class _CameraScreenState extends State<CameraScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.inactive) {
-      _stopPalmStream();
       _voiceService.stopListening();
+      if (_timelapseState.isRecording) {
+        _timelapseService.stop(onUpdate: (s) => setState(() => _timelapseState = s));
+      }
+      _stopFaceStream();
       _controller?.dispose();
     } else if (state == AppLifecycleState.resumed) {
       _initCamera();
@@ -120,6 +145,10 @@ class _CameraScreenState extends State<CameraScreen>
       _cameras = await availableCameras();
       if (_cameras.isEmpty) return;
 
+      // Check for ultrawide lens (typically index 2 or lens with wider FOV)
+      _hasUltraWide = _cameras.where((c) =>
+          c.lensDirection == CameraLensDirection.back).length > 1;
+
       final isp = await NativeCaptureService.getSupportedFeatures();
       debugPrint('Device ISP features: $isp');
 
@@ -138,29 +167,144 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _setupController(CameraDescription camera) async {
-    final prev = _controller;
+    if (mounted) {
+      setState(() => _isInitialized = false);
+    }
+
+    // Stop face detection stream before disposing
+    await _stopFaceStream();
+
+    if (_controller != null) {
+      try {
+        await _controller!.dispose();
+      } catch (_) {}
+      _controller = null;
+      await Future.delayed(const Duration(milliseconds: 120));
+    }
+
+    // Query real hardware capabilities for active camera
+    final cameraId = (camera.lensDirection == CameraLensDirection.front) ? '1' : '0';
+    final videoCaps = await NativeCaptureService.getVideoCapabilities(cameraId: cameraId);
+
+    // Determine ResolutionPreset based on selected VideoQuality & hardware caps
+    ResolutionPreset preset = ResolutionPreset.high;
+    if (_settings.cameraMode == CameraMode.video || _settings.cameraMode == CameraMode.timelapse) {
+      switch (_settings.videoQuality) {
+        case VideoQuality.uhd:
+          preset = videoCaps.has4K ? ResolutionPreset.ultraHigh : ResolutionPreset.veryHigh;
+          break;
+        case VideoQuality.fhd:
+          preset = videoCaps.has1080p ? ResolutionPreset.veryHigh : ResolutionPreset.high;
+          break;
+        case VideoQuality.hd:
+          preset = ResolutionPreset.high;
+          break;
+      }
+    } else {
+      preset = ResolutionPreset.high;
+    }
+
     final newController = CameraController(
       camera,
-      ResolutionPreset.high,
+      preset,
       enableAudio: true,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     try {
       await newController.initialize();
-      await newController.setFlashMode(_settings.flashMode);
+
+      try {
+        await newController.setFlashMode(_settings.flashMode);
+      } catch (_) {
+        try {
+          await newController.setFlashMode(FlashMode.off);
+        } catch (_) {}
+      }
+
+      // Query zoom range
+      final minZ = await newController.getMinZoomLevel();
+      final maxZ = await newController.getMaxZoomLevel();
+
+      // Format plain text video specs
+      final previewSize = newController.value.previewSize;
+      final activeRes = (previewSize != null)
+          ? '${previewSize.height.toInt()}p'
+          : videoCaps.maxResolution;
+      final capsText = '$activeRes @ ${videoCaps.maxFps}fps';
 
       if (mounted) {
         setState(() {
           _controller = newController;
           _isInitialized = true;
+          _minZoom = minZ;
+          _maxZoom = maxZ;
+          _currentZoom = 1.0;
+          _activeVideoCaps = videoCaps;
+          _videoCapsText = capsText;
         });
       }
-      await prev?.dispose();
+
+      // Start face detection stream if front camera
+      if (_settings.isFrontCamera) {
+        _startFaceStream();
+      }
     } catch (e) {
       debugPrint('Controller setup error: $e');
-      await newController.dispose();
+      if (mounted) {
+        setState(() => _isInitialized = false);
+      }
+      try {
+        await newController.dispose();
+      } catch (_) {}
     }
+  }
+
+  // ── Zoom ────────────────────────────────────────────────────────────────
+
+  Future<void> _setZoom(double zoom) async {
+    final clamped = zoom.clamp(_minZoom, _maxZoom);
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    try {
+      await _controller!.setZoomLevel(clamped);
+      if (mounted) setState(() => _currentZoom = clamped);
+    } catch (e) {
+      debugPrint('Zoom error: $e');
+    }
+  }
+
+  // ── Face detection ──────────────────────────────────────────────────────
+
+  void _startFaceStream() {
+    if (_isFaceStreamActive || _controller == null) return;
+    _faceService.initialize();
+    _isFaceStreamActive = true;
+
+    final camera = _settings.isFrontCamera
+        ? _cameras.firstWhere(
+            (c) => c.lensDirection == CameraLensDirection.front,
+            orElse: () => _cameras.first)
+        : _cameras.first;
+
+    try {
+      _controller!.startImageStream((CameraImage image) {
+        _faceService.processImage(image, camera);
+      });
+    } catch (e) {
+      debugPrint('Face stream start error: $e');
+      _isFaceStreamActive = false;
+    }
+  }
+
+  Future<void> _stopFaceStream() async {
+    if (!_isFaceStreamActive) return;
+    _isFaceStreamActive = false;
+    _faceService.stop();
+    try {
+      if (_controller != null && _controller!.value.isStreamingImages) {
+        await _controller!.stopImageStream();
+      }
+    } catch (_) {}
   }
 
   // ── Shutter action entry point ────────────────────────────────────────────
@@ -168,33 +312,55 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _onShutterPressed() async {
     if (_isProcessing || _controller == null) return;
 
-    if (_settings.cameraMode == CameraMode.video) {
-      _toggleVideoRecording();
-      return;
-    }
-
-    if (_settings.timerSeconds > 0 && _settings.captureMethod == CaptureMethod.normal) {
-      setState(() => _countdownValue = _settings.timerSeconds);
-      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-        if (!mounted) return;
-        setState(() => _countdownValue--);
-        if (_countdownValue <= 0) {
-          t.cancel();
+    switch (_settings.cameraMode) {
+      case CameraMode.photo:
+        if (_settings.timerSeconds > 0 && _settings.captureMethod == CaptureMethod.normal) {
+          _startTimerCountdown(_startCapture);
+        } else {
           _startCapture();
         }
-      });
-      return;
+        break;
+      case CameraMode.portrait:
+        if (_settings.timerSeconds > 0 && _settings.captureMethod == CaptureMethod.normal) {
+          _startTimerCountdown(_startPortraitCapture);
+        } else {
+          _startPortraitCapture();
+        }
+        break;
+      case CameraMode.video:
+        _toggleVideoRecording();
+        break;
+      case CameraMode.night:
+        _startNightCapture();
+        break;
+      case CameraMode.timelapse:
+        _toggleTimelapse();
+        break;
     }
-
-    _startCapture();
   }
 
-  // ── Photo capture ─────────────────────────────────────────────────────────
+  void _startTimerCountdown(VoidCallback onComplete) {
+    setState(() => _countdownValue = _settings.timerSeconds);
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      setState(() => _countdownValue--);
+      if (_countdownValue <= 0) {
+        t.cancel();
+        onComplete();
+      }
+    });
+  }
+
+  // ── Photo capture (2-frame blend) ─────────────────────────────────────────
 
   Future<void> _startCapture() async {
     if (_controller == null || _isProcessing) return;
 
-    if (_palmStreamActive) await _stopPalmStream();
+    // Stop face stream before taking picture (can't take picture while streaming)
+    final wasFaceStreaming = _isFaceStreamActive;
+    if (wasFaceStreaming) {
+      await _stopFaceStream();
+    }
 
     setState(() {
       _isProcessing = true;
@@ -229,7 +395,6 @@ class _CameraScreenState extends State<CameraScreen>
         frame2: raw2,
         quality: _settings.quality,
         deviceModel: _settings.watermarkEnabled ? _deviceModel : null,
-        filter: _settings.filter,
       );
 
       if (finalJpeg != null) {
@@ -242,6 +407,179 @@ class _CameraScreenState extends State<CameraScreen>
       _finishProcessing(null);
     } finally {
       if (mounted) setState(() => _isProcessing = false);
+      // Resume face stream if we were on front camera
+      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      }
+    }
+  }
+
+  // ── Portrait mode (ML Kit segmentation + bokeh) ─────────────────────────
+
+  Future<void> _startPortraitCapture() async {
+    if (_controller == null || _isProcessing) return;
+
+    final wasFaceStreaming = _isFaceStreamActive;
+    if (wasFaceStreaming) await _stopFaceStream();
+
+    setState(() {
+      _isProcessing = true;
+      _thumbnailState = ThumbnailState.idle;
+    });
+
+    if (_settings.enableShutterSound) SoundService.playShutterSound();
+    HapticFeedback.heavyImpact();
+
+    try {
+      final XFile f1 = await _controller!.takePicture();
+      final Uint8List raw1 = await f1.readAsBytes();
+      try { File(f1.path).deleteSync(); } catch (_) {}
+
+      if (mounted) {
+        setState(() {
+          _thumbnailBytes = raw1;
+          _thumbnailState = ThumbnailState.processing;
+        });
+      }
+
+      // Apply ML Kit selfie segmentation + Gaussian bokeh
+      final portrayed = await PortraitService.applyPortraitBokeh(
+        imageBytes: raw1,
+        blurLevel: _settings.bokehBlurLevel,
+        isFrontCamera: _settings.isFrontCamera,
+      );
+
+      // Save bokeh-rendered image to gallery
+      await _saveToGallery(portrayed);
+
+      _finishProcessing(portrayed);
+    } catch (e) {
+      debugPrint('Portrait capture error: $e');
+      _finishProcessing(null);
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      }
+    }
+  }
+
+  // ── Night Sight capture (4-frame multi-shot low-light) ────────────────────
+
+  Future<void> _startNightCapture() async {
+    if (_controller == null || _isProcessing) return;
+
+    final wasFaceStreaming = _isFaceStreamActive;
+    if (wasFaceStreaming) await _stopFaceStream();
+
+    setState(() {
+      _isProcessing = true;
+      _isCapturingNight = true;
+      _nightFrameCount = 0;
+      _thumbnailState = ThumbnailState.idle;
+    });
+
+    if (_settings.enableShutterSound) SoundService.playShutterSound();
+    HapticFeedback.mediumImpact();
+
+    final List<Uint8List> frames = [];
+
+    try {
+      // Fire 4 rapid low-noise hardware ISP shots
+      for (int i = 1; i <= 4; i++) {
+        if (!mounted) break;
+        setState(() => _nightFrameCount = i);
+
+        final XFile f = await _controller!.takePicture();
+        final Uint8List bytes = await f.readAsBytes();
+        frames.add(bytes);
+        try { File(f.path).deleteSync(); } catch (_) {}
+
+        if (i == 1 && mounted) {
+          setState(() {
+            _thumbnailBytes = bytes;
+            _thumbnailState = ThumbnailState.processing;
+          });
+        }
+        if (i < 4) await Future.delayed(const Duration(milliseconds: 160));
+      }
+
+      // Process in NightSight isolate: 4-frame noise reduction + shadow lift
+      final finalJpeg = await NightService.processNightSight(
+        frames: frames,
+        deviceModel: _settings.watermarkEnabled ? _deviceModel : null,
+      );
+
+      if (finalJpeg != null) {
+        await _saveToGallery(finalJpeg);
+      }
+
+      _finishProcessing(finalJpeg);
+    } catch (e) {
+      debugPrint('Night capture error: $e');
+      _finishProcessing(null);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+          _isCapturingNight = false;
+        });
+      }
+      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      }
+    }
+  }
+
+  // ── Timelapse mode recording ──────────────────────────────────────────────
+
+  void _toggleTimelapse() {
+    if (_timelapseState.isRecording) {
+      _timelapseService.stop(onUpdate: (s) {
+        if (mounted) setState(() => _timelapseState = s);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Timelapse saved (${_timelapseState.capturedFrames} frames)'),
+          backgroundColor: const Color(0xFF222222),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } else {
+      _timelapseService.start(
+        intervalSeconds: _settings.timelapseIntervalSeconds,
+        onFrameTrigger: () async {
+          if (_controller == null || !_controller!.value.isInitialized) return;
+          try {
+            final XFile f = await _controller!.takePicture();
+            final Uint8List bytes = await f.readAsBytes();
+            try { File(f.path).deleteSync(); } catch (_) {}
+
+            if (mounted) {
+              setState(() {
+                _thumbnailBytes = bytes;
+                _thumbnailState = ThumbnailState.processing;
+              });
+            }
+
+            final enhanced = await EnhancementService.enhanceWithQuality(
+              frame1: bytes,
+              quality: PictureQuality.low,
+              deviceModel: _settings.watermarkEnabled ? _deviceModel : null,
+            );
+
+            if (enhanced != null) {
+              await _saveToGallery(enhanced);
+              if (mounted) setState(() => _thumbnailState = ThumbnailState.done);
+            }
+          } catch (e) {
+            debugPrint('Timelapse frame error: $e');
+          }
+        },
+        onUpdate: (s) {
+          if (mounted) setState(() => _timelapseState = s);
+        },
+      );
     }
   }
 
@@ -271,113 +609,8 @@ class _CameraScreenState extends State<CameraScreen>
       if (mounted) setState(() => _thumbnailState = ThumbnailState.idle);
     });
 
-    if (_settings.captureMethod == CaptureMethod.palm) {
-      Future.delayed(const Duration(milliseconds: 600), _startPalmStream);
-    } else if (_settings.captureMethod == CaptureMethod.voice && !_voiceListening) {
+    if (_settings.captureMethod == CaptureMethod.voice && !_voiceListening) {
       Future.delayed(const Duration(milliseconds: 600), _startVoiceListening);
-    }
-  }
-
-  // ── Palm shutter ──────────────────────────────────────────────────────────
-
-  Future<void> _startPalmStream() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    if (_palmStreamActive || _isProcessing) return;
-
-    try {
-      _palmStreamActive = true;
-      _palmDetected = false;
-      _palmFrameSkip = 0;
-
-      await _controller!.startImageStream((CameraImage frame) {
-        if (!_palmStreamActive || _palmDetected) return;
-
-        _palmFrameSkip++;
-        if (_palmFrameSkip % 4 != 0) return;
-
-        final detected = _checkPalmInFrame(frame);
-        if (detected && !_palmDetected) {
-          _palmDetected = true;
-          _startPalmCountdown();
-        }
-      });
-    } catch (e) {
-      debugPrint('Palm stream error: $e');
-      _palmStreamActive = false;
-    }
-  }
-
-  Future<void> _stopPalmStream() async {
-    if (!_palmStreamActive) return;
-    _palmStreamActive = false;
-    _palmDetected = false;
-    _palmCountdownTimer?.cancel();
-    if (mounted) setState(() => _palmCountdown = 0);
-
-    try {
-      await _controller?.stopImageStream();
-    } catch (_) {}
-  }
-
-  void _startPalmCountdown() {
-    if (mounted) setState(() => _palmCountdown = 3);
-
-    _palmCountdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) { t.cancel(); return; }
-      setState(() => _palmCountdown--);
-      if (_palmCountdown <= 0) {
-        t.cancel();
-        _stopPalmStream().then((_) => _startCapture());
-      }
-    });
-  }
-
-  bool _checkPalmInFrame(CameraImage frame) {
-    try {
-      final int w = frame.width;
-      final int h = frame.height;
-      final yPlane = frame.planes[0];
-      final uPlane = frame.planes[1];
-      final vPlane = frame.planes[2];
-      final int uvPixelStride = uPlane.bytesPerPixel ?? 2;
-
-      final int startCol = w ~/ 3;
-      final int endCol = w * 2 ~/ 3;
-      final int startRow = h ~/ 3;
-      final int endRow = h * 2 ~/ 3;
-      final int stepCol = (endCol - startCol) ~/ 20;
-      final int stepRow = (endRow - startRow) ~/ 20;
-
-      int skinCount = 0, total = 0;
-
-      for (int row = startRow; row < endRow; row += stepRow.clamp(1, 999)) {
-        for (int col = startCol; col < endCol; col += stepCol.clamp(1, 999)) {
-          final int yIdx = row * yPlane.bytesPerRow + col;
-          final int uvRow = (row >> 1) * uPlane.bytesPerRow;
-          final int uvCol = (col >> 1) * uvPixelStride;
-
-          if (yIdx >= yPlane.bytes.length) continue;
-          if (uvRow + uvCol >= uPlane.bytes.length) continue;
-
-          final int y = yPlane.bytes[yIdx] & 0xFF;
-          final int u = (uPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
-          final int v = (vPlane.bytes[uvRow + uvCol] & 0xFF) - 128;
-
-          final int r = (y + 1.402 * v).clamp(0, 255).toInt();
-          final int g = (y - 0.344136 * u - 0.714136 * v).clamp(0, 255).toInt();
-          final int b = (y + 1.772 * u).clamp(0, 255).toInt();
-
-          if (r > 80 && g > 40 && b > 20 && r > g && r > b &&
-              (r - g).abs() > 10 && r < 250) {
-            skinCount++;
-          }
-          total++;
-        }
-      }
-
-      return total > 0 && (skinCount / total) >= 0.38;
-    } catch (_) {
-      return false;
     }
   }
 
@@ -397,18 +630,13 @@ class _CameraScreenState extends State<CameraScreen>
     await _voiceService.stopListening();
   }
 
-  // ── Capture method toggle ─────────────────────────────────────────────────
-
   Future<void> _setCaptureMethod(CaptureMethod method) async {
-    if (_settings.captureMethod == CaptureMethod.palm) await _stopPalmStream();
     if (_settings.captureMethod == CaptureMethod.voice) await _stopVoiceListening();
 
     final newSettings = _settings.copyWith(captureMethod: method);
     setState(() => _settings = newSettings);
 
-    if (method == CaptureMethod.palm) {
-      await _startPalmStream();
-    } else if (method == CaptureMethod.voice) {
+    if (method == CaptureMethod.voice) {
       await _startVoiceListening();
     }
   }
@@ -437,6 +665,8 @@ class _CameraScreenState extends State<CameraScreen>
         setState(() { _isRecordingVideo = false; _videoRecordSeconds = 0; });
       }
     } else {
+      // Stop face stream before recording
+      if (_isFaceStreamActive) await _stopFaceStream();
       try {
         await _controller!.startVideoRecording();
         HapticFeedback.mediumImpact();
@@ -457,7 +687,6 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _flipCamera() async {
     if (_isProcessing || _isRecordingVideo || _cameras.length < 2) return;
 
-    if (_settings.captureMethod == CaptureMethod.palm) await _stopPalmStream();
     if (_settings.captureMethod == CaptureMethod.voice) await _stopVoiceListening();
 
     final newSettings = _settings.copyWith(isFrontCamera: !_settings.isFrontCamera);
@@ -470,14 +699,63 @@ class _CameraScreenState extends State<CameraScreen>
             (c) => c.lensDirection == CameraLensDirection.back,
             orElse: () => _cameras.first);
 
-    setState(() => _settings = newSettings);
+    setState(() {
+      _settings = newSettings;
+      _currentZoom = 1.0;
+    });
     await _setupController(target);
   }
 
+  Future<void> _toggleVideoQuality() async {
+    if (_isProcessing || _isRecordingVideo || _cameras.isEmpty) return;
+
+    final caps = _activeVideoCaps;
+    VideoQuality nextQuality;
+    if (_settings.videoQuality == VideoQuality.hd) {
+      nextQuality = (caps != null && caps.has1080p) ? VideoQuality.fhd : VideoQuality.hd;
+    } else if (_settings.videoQuality == VideoQuality.fhd) {
+      nextQuality = (caps != null && caps.has4K) ? VideoQuality.uhd : VideoQuality.hd;
+    } else {
+      nextQuality = VideoQuality.hd;
+    }
+
+    final newSettings = _settings.copyWith(videoQuality: nextQuality);
+    _onSettingsChanged(newSettings);
+  }
+
   void _onSettingsChanged(CameraSettings newSettings) async {
+    final videoQualityChanged = newSettings.videoQuality != _settings.videoQuality;
+    final modeChanged = newSettings.cameraMode != _settings.cameraMode;
+
+    // Handle location permission request when enabling location info
+    if (newSettings.saveLocationInfo && !_settings.saveLocationInfo) {
+      final locPerm = await Permission.location.request();
+      if (!locPerm.isGranted) {
+        // Don't enable if permission denied
+        return;
+      }
+    }
+
     setState(() => _settings = newSettings);
     if (_controller != null && _controller!.value.isInitialized) {
-      await _controller!.setFlashMode(newSettings.flashMode);
+      try {
+        await _controller!.setFlashMode(newSettings.flashMode);
+      } catch (e) {
+        debugPrint('Flash mode change error: $e');
+      }
+    }
+
+    if (videoQualityChanged || (modeChanged && newSettings.cameraMode == CameraMode.video)) {
+      if (_cameras.isNotEmpty) {
+        final target = _settings.isFrontCamera
+            ? _cameras.firstWhere(
+                (c) => c.lensDirection == CameraLensDirection.front,
+                orElse: () => _cameras.first)
+            : _cameras.firstWhere(
+                (c) => c.lensDirection == CameraLensDirection.back,
+                orElse: () => _cameras.first);
+        await _setupController(target);
+      }
     }
   }
 
@@ -510,9 +788,13 @@ class _CameraScreenState extends State<CameraScreen>
           _buildPreviewWithAspectRatio(),
           if (_settings.showGrid) _buildGrid(),
           if (_isRecordingVideo) _buildVideoTimer(),
+          if (_timelapseState.isRecording) _buildTimelapseTimer(),
+          if (_isCapturingNight) _buildNightSightOverlay(),
           if (_countdownValue > 0) _buildCountdown(),
-          if (_palmCountdown > 0) _buildPalmCountdown(),
           if (_voiceListening) _buildVoiceOverlay(),
+
+          // Face detection overlay (only on front camera)
+          if (_settings.isFrontCamera) _buildFaceOverlay(),
 
           SafeArea(child: _buildControls()),
         ],
@@ -545,6 +827,46 @@ class _CameraScreenState extends State<CameraScreen>
     return SizedBox.expand(child: previewWidget);
   }
 
+  /// Draws yellow outlined rectangles on detected faces.
+  Widget _buildFaceOverlay() {
+    return ValueListenableBuilder<List<DetectedFace>>(
+      valueListenable: _faceService.faces,
+      builder: (context, faces, _) {
+        if (faces.isEmpty) return const SizedBox.shrink();
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            return Stack(
+              children: faces.map((face) {
+                // Mirror the x-axis for front camera
+                final rect = face.normalizedRect;
+                final left = (1.0 - rect.right) * constraints.maxWidth;
+                final top = rect.top * constraints.maxHeight;
+                final width = rect.width * constraints.maxWidth;
+                final height = rect.height * constraints.maxHeight;
+
+                return Positioned(
+                  left: left,
+                  top: top,
+                  width: width,
+                  height: height,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: Colors.amber.withAlpha(200),
+                        width: 2.0,
+                      ),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                );
+              }).toList(),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildVideoTimer() {
     final mins = (_videoRecordSeconds ~/ 60).toString().padLeft(2, '0');
     final secs = (_videoRecordSeconds % 60).toString().padLeft(2, '0');
@@ -573,6 +895,61 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  Widget _buildTimelapseTimer() {
+    final mins = (_timelapseState.elapsedSeconds ~/ 60).toString().padLeft(2, '0');
+    final secs = (_timelapseState.elapsedSeconds % 60).toString().padLeft(2, '0');
+    return Positioned(
+      top: 60,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.amber.withAlpha(220),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.timelapse_rounded, color: Colors.black, size: 16)
+                .animate(onPlay: (c) => c.repeat(reverse: true))
+                .rotate(duration: 2000.ms),
+            const SizedBox(width: 8),
+            Text(
+              'TIMELAPSE  $mins:$secs  •  ${_timelapseState.capturedFrames} frames',
+              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNightSightOverlay() {
+    return Positioned(
+      bottom: 150,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.amber.withAlpha(180)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.nightlight_round, color: Colors.amber, size: 18)
+                .animate(onPlay: (c) => c.repeat(reverse: true))
+                .fade(begin: 0.4, end: 1.0, duration: 600.ms),
+            const SizedBox(width: 10),
+            Text(
+              'Night Sight ($_nightFrameCount/4) • Hold steady...',
+              style: const TextStyle(color: Colors.amber, fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildGrid() {
     return IgnorePointer(
       child: CustomPaint(painter: _GridPainter(), child: const SizedBox.expand()),
@@ -590,27 +967,6 @@ class _CameraScreenState extends State<CameraScreen>
       ).animate(key: ValueKey(_countdownValue)).scale(
             begin: const Offset(1.3, 1.3), end: const Offset(1.0, 1.0),
             duration: 400.ms, curve: Curves.easeOut),
-    );
-  }
-
-  Widget _buildPalmCountdown() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.back_hand_outlined, color: Colors.white, size: 64),
-          const SizedBox(height: 8),
-          Text(
-            '$_palmCountdown',
-            style: const TextStyle(
-              color: Colors.white, fontSize: 100, fontWeight: FontWeight.w200,
-              shadows: [Shadow(color: Colors.black54, blurRadius: 20)],
-            ),
-          ).animate(key: ValueKey(_palmCountdown)).scale(
-                begin: const Offset(1.3, 1.3), end: const Offset(1.0, 1.0),
-                duration: 400.ms, curve: Curves.easeOut),
-        ],
-      ),
     );
   }
 
@@ -648,18 +1004,31 @@ class _CameraScreenState extends State<CameraScreen>
           settings: _settings,
           onSettingsChanged: _onSettingsChanged,
           onOpenSettings: _openSettingsScreen,
+          videoCapsText: _videoCapsText,
+          onToggleVideoQuality: _toggleVideoQuality,
         ),
         const Spacer(),
 
-        // Photo filter horizontal carousel overlay
-        if (_showFilterCarousel) _buildFilterCarouselOverlay(),
+        // Zoom control (rear camera only)
+        if (!_settings.isFrontCamera && _maxZoom > 1.0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ZoomControlWidget(
+              currentZoom: _currentZoom,
+              minZoom: _minZoom,
+              maxZoom: _maxZoom,
+              hasUltraWide: _hasUltraWide,
+              onZoomChanged: _setZoom,
+            ),
+          ),
 
         _buildModeSelector(),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         _buildCaptureMethodRow(),
-        const SizedBox(height: 16),
+        if (_settings.cameraMode == CameraMode.portrait)
+          _buildBokehPill(),
+        const SizedBox(height: 12),
 
-        // Bottom control row with shutter + floating magic wand filter button
         Padding(
           padding: const EdgeInsets.fromLTRB(32, 0, 32, 28),
           child: Row(
@@ -667,190 +1036,17 @@ class _CameraScreenState extends State<CameraScreen>
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               _buildFlipButton(),
-              Stack(
-                clipBehavior: Clip.none,
-                alignment: Alignment.center,
-                children: [
-                  ShutterButton(
-                    onPressed: _isProcessing ? null : _onShutterPressed,
-                    isProcessing: _isProcessing,
-                    isVideoMode: _settings.cameraMode == CameraMode.video,
-                    isRecording: _isRecordingVideo,
-                  ),
-                  // Floating magic wand / filter button (positioned top right of shutter)
-                  if (!_isRecordingVideo && _settings.cameraMode == CameraMode.photo)
-                    Positioned(
-                      right: -24,
-                      top: -6,
-                      child: GestureDetector(
-                        onTap: () {
-                          HapticFeedback.selectionClick();
-                          setState(() => _showFilterCarousel = !_showFilterCarousel);
-                        },
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _settings.filter != CameraFilter.none || _showFilterCarousel
-                                ? Colors.amber
-                                : Colors.black87,
-                            border: Border.all(
-                              color: Colors.white.withAlpha(200),
-                              width: 1.5,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withAlpha(120),
-                                blurRadius: 6,
-                              )
-                            ],
-                          ),
-                          child: Icon(
-                            Icons.auto_fix_high_rounded,
-                            size: 18,
-                            color: _settings.filter != CameraFilter.none || _showFilterCarousel
-                                ? Colors.black
-                                : Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
+              ShutterButton(
+                onPressed: _isProcessing ? null : _onShutterPressed,
+                isProcessing: _isProcessing,
+                isVideoMode: _settings.cameraMode == CameraMode.video || _settings.cameraMode == CameraMode.timelapse,
+                isRecording: _isRecordingVideo || _timelapseState.isRecording,
               ),
               _buildThumbnail(),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  // ── Photo filter carousel ──────────────────────────────────────────────────
-
-  Widget _buildFilterCarouselOverlay() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 14, left: 16, right: 16),
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-      decoration: BoxDecoration(
-        color: Colors.black.withAlpha(215),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white24, width: 0.8),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 8, bottom: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Photo Filters',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                GestureDetector(
-                  onTap: () => setState(() => _showFilterCarousel = false),
-                  child: const Icon(Icons.close_rounded, color: Colors.white54, size: 18),
-                ),
-              ],
-            ),
-          ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            child: Row(
-              children: CameraFilter.values.map((f) => _buildFilterSquare(f)).toList(),
-            ),
-          ),
-        ],
-      ),
-    ).animate().fadeIn(duration: 180.ms).slideY(begin: 0.1, end: 0);
-  }
-
-  Widget _buildFilterSquare(CameraFilter f) {
-    final isSelected = _settings.filter == f;
-
-    // Custom gradient for each filter square preview
-    LinearGradient gradient;
-    switch (f) {
-      case CameraFilter.none:
-        gradient = const LinearGradient(colors: [Color(0xFF444444), Color(0xFF222222)]);
-        break;
-      case CameraFilter.warm:
-        gradient = const LinearGradient(colors: [Color(0xFFFF9800), Color(0xFFFF5722)]);
-        break;
-      case CameraFilter.cool:
-        gradient = const LinearGradient(colors: [Color(0xFF03A9F4), Color(0xFF00BCD4)]);
-        break;
-      case CameraFilter.vivid:
-        gradient = const LinearGradient(colors: [Color(0xFFE91E63), Color(0xFF9C27B0)]);
-        break;
-      case CameraFilter.noir:
-        gradient = const LinearGradient(colors: [Color(0xFF888888), Color(0xFF111111)]);
-        break;
-      case CameraFilter.sepia:
-        gradient = const LinearGradient(colors: [Color(0xFF8D6E63), Color(0xFF3E2723)]);
-        break;
-      case CameraFilter.dramatic:
-        gradient = const LinearGradient(colors: [Color(0xFF37474F), Color(0xFF212121)]);
-        break;
-      case CameraFilter.cyber:
-        gradient = const LinearGradient(colors: [Color(0xFF00E5FF), Color(0xFFD500F9)]);
-        break;
-      case CameraFilter.fade:
-        gradient = const LinearGradient(colors: [Color(0xFF90A4AE), Color(0xFF546E7A)]);
-        break;
-    }
-
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.selectionClick();
-        _onSettingsChanged(_settings.copyWith(filter: f));
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 5),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: 54,
-              height: 54,
-              decoration: BoxDecoration(
-                gradient: gradient,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: isSelected ? Colors.amber : Colors.white24,
-                  width: isSelected ? 2.5 : 1.0,
-                ),
-                boxShadow: isSelected
-                    ? [const BoxShadow(color: Colors.amber, blurRadius: 6)]
-                    : null,
-              ),
-              child: isSelected
-                  ? const Center(
-                      child: Icon(Icons.check_rounded, color: Colors.white, size: 22),
-                    )
-                  : null,
-            ),
-            const SizedBox(height: 4),
-            Text(
-              f.label,
-              style: TextStyle(
-                color: isSelected ? Colors.amber : Colors.white70,
-                fontSize: 11,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -868,84 +1064,201 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Widget _buildModeSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.black45,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
+    final modes = [
+      (CameraMode.photo, 'PHOTO'),
+      (CameraMode.portrait, 'PORTRAIT'),
+      (CameraMode.video, 'VIDEO'),
+      (CameraMode.night, 'NIGHT'),
+      (CameraMode.timelapse, 'TIMELAPSE'),
+    ];
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildModeChip(CameraMode.photo, 'PHOTO'),
-          _buildModeChip(CameraMode.video, 'VIDEO'),
-        ],
+        children: modes.map((entry) {
+          final mode = entry.$1;
+          final label = entry.$2;
+          final isSelected = _settings.cameraMode == mode;
+          return GestureDetector(
+            onTap: _isProcessing || _isRecordingVideo || _timelapseState.isRecording
+                ? null
+                : () async {
+                    if (_settings.captureMethod == CaptureMethod.voice) await _stopVoiceListening();
+                    _onSettingsChanged(_settings.copyWith(cameraMode: mode));
+                  },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedDefaultTextStyle(
+                    duration: const Duration(milliseconds: 180),
+                    style: TextStyle(
+                      color: isSelected ? Colors.white : Colors.white38,
+                      fontSize: isSelected ? 12 : 11,
+                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                      letterSpacing: 1.1,
+                    ),
+                    child: Text(label),
+                  ),
+                  const SizedBox(height: 4),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    width: isSelected ? 20 : 0,
+                    height: 2.5,
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? (mode == CameraMode.portrait ? const Color(0xFFFF6B9D) : Colors.amber)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(2),
+                      boxShadow: isSelected
+                          ? [
+                              BoxShadow(
+                                color: (mode == CameraMode.portrait
+                                        ? const Color(0xFFFF6B9D)
+                                        : Colors.amber)
+                                    .withAlpha(180),
+                                blurRadius: 6,
+                                spreadRadius: 1,
+                              )
+                            ]
+                          : [],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
 
-  Widget _buildModeChip(CameraMode mode, String label) {
-    final isSelected = _settings.cameraMode == mode;
-    return GestureDetector(
-      onTap: _isProcessing || _isRecordingVideo
-          ? null
-          : () async {
-              if (_settings.captureMethod == CaptureMethod.palm) await _stopPalmStream();
-              if (_settings.captureMethod == CaptureMethod.voice) await _stopVoiceListening();
-              _onSettingsChanged(_settings.copyWith(cameraMode: mode));
-            },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.amber : Colors.transparent,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: isSelected ? Colors.black : Colors.white70,
-            fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.8,
+  Widget _buildBokehPill() {
+    final fStops = ['f/1.4', 'f/2.0', 'f/2.8', 'f/4.0', 'f/8.0'];
+    final blurForFStop = {'f/1.4': 1.0, 'f/2.0': 0.78, 'f/2.8': 0.6, 'f/4.0': 0.38, 'f/8.0': 0.18};
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // F-stop selector row
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: fStops.map((fStop) {
+                final isActive = _settings.bokehFStop == fStop;
+                return GestureDetector(
+                  onTap: () {
+                    final blur = blurForFStop[fStop] ?? 0.6;
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        bokehFStop: fStop,
+                        bokehBlurLevel: blur,
+                      );
+                    });
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    margin: const EdgeInsets.symmetric(horizontal: 5),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: isActive
+                          ? const Color(0xFFFF6B9D).withAlpha(220)
+                          : Colors.black.withAlpha(140),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: isActive
+                            ? const Color(0xFFFF6B9D)
+                            : Colors.white24,
+                        width: 1.2,
+                      ),
+                      boxShadow: isActive
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFFFF6B9D).withAlpha(120),
+                                blurRadius: 10,
+                                spreadRadius: 1,
+                              )
+                            ]
+                          : [],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.camera_rounded,
+                          size: 11,
+                          color: isActive ? Colors.white : Colors.white54,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          fStop,
+                          style: TextStyle(
+                            color: isActive ? Colors.white : Colors.white54,
+                            fontSize: 12,
+                            fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
           ),
-        ),
+          const SizedBox(height: 6),
+          Text(
+            'PORTRAIT DEPTH',
+            style: TextStyle(
+              color: const Color(0xFFFF6B9D).withAlpha(200),
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.8,
+            ),
+          ),
+        ],
       ),
-    );
+    ).animate().fadeIn(duration: 220.ms).slideY(begin: 0.08, end: 0);
   }
 
   Widget _buildCaptureMethodRow() {
-    if (_settings.cameraMode == CameraMode.video || _isRecordingVideo) {
+    final isPhotoLike = _settings.cameraMode == CameraMode.photo ||
+        _settings.cameraMode == CameraMode.portrait;
+    if (!isPhotoLike || _isRecordingVideo) {
       return const SizedBox.shrink();
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-      decoration: BoxDecoration(
-        color: Colors.black45,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildMethodChip(
-            method: CaptureMethod.normal,
-            icon: Icons.camera_alt_rounded,
-            label: 'Shutter',
-          ),
-          _buildMethodChip(
-            method: CaptureMethod.palm,
-            icon: Icons.back_hand_outlined,
-            label: 'Palm',
-          ),
-          _buildMethodChip(
-            method: CaptureMethod.voice,
-            icon: Icons.mic_rounded,
-            label: 'Voice',
-          ),
-        ],
-      ),
-    ).animate().fadeIn(duration: 200.ms);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black45,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildMethodChip(
+              method: CaptureMethod.normal,
+              icon: Icons.camera_alt_rounded,
+              label: 'Shutter',
+            ),
+            _buildMethodChip(
+              method: CaptureMethod.voice,
+              icon: Icons.mic_rounded,
+              label: 'Voice',
+            ),
+          ],
+        ),
+      ).animate().fadeIn(duration: 200.ms),
+    );
   }
 
   Widget _buildMethodChip({
@@ -987,7 +1300,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   Widget _buildFlipButton() {
     return GestureDetector(
-      onTap: _isProcessing || _isRecordingVideo ? null : _flipCamera,
+      onTap: _isProcessing || _isRecordingVideo || _timelapseState.isRecording ? null : _flipCamera,
       child: Container(
         width: 56,
         height: 56,

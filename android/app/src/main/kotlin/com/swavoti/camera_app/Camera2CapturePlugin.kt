@@ -53,6 +53,10 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
                 val cameraId = call.argument<String>("cameraId") ?: "0"
                 getSupportedFeatures(cameraId, result)
             }
+            "getVideoCapabilities" -> {
+                val cameraId = call.argument<String>("cameraId") ?: "0"
+                getVideoCapabilities(cameraId, result)
+            }
             "captureHighQuality" -> {
                 val cameraId = call.argument<String>("cameraId") ?: "0"
                 captureHighQuality(cameraId, result)
@@ -97,6 +101,78 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
             result.success(features)
         } catch (e: Exception) {
             result.error("QUERY_ERROR", e.message, null)
+        }
+    }
+
+    /**
+     * Returns hardware-supported video capabilities (max resolution, max FPS, resolution list).
+     */
+    private fun getVideoCapabilities(cameraId: String, result: Result) {
+        try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(cameraId)
+
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val videoSizes = streamMap?.getOutputSizes(android.media.MediaRecorder::class.java)
+                ?: streamMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
+                ?: arrayOf()
+
+            var maxW = 0
+            var maxH = 0
+            var has4K = false
+            var has1080p = false
+            var has720p = false
+            val supportedResolutions = mutableListOf<String>()
+
+            for (size in videoSizes) {
+                val w = size.width
+                val h = size.height
+                if (w * h > maxW * maxH) {
+                    maxW = w
+                    maxH = h
+                }
+                val minDim = Math.min(w, h)
+                if (minDim >= 2160 && !has4K) {
+                    has4K = true
+                    supportedResolutions.add("4K")
+                } else if (minDim >= 1080 && minDim < 2160 && !has1080p) {
+                    has1080p = true
+                    supportedResolutions.add("1080p")
+                } else if (minDim >= 720 && minDim < 1080 && !has720p) {
+                    has720p = true
+                    supportedResolutions.add("720p")
+                }
+            }
+
+            // Target FPS ranges
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: arrayOf()
+            var maxFps = 30
+            for (range in fpsRanges) {
+                if (range.upper > maxFps) {
+                    maxFps = range.upper
+                }
+            }
+
+            val maxResLabel = when {
+                has4K -> "4K"
+                has1080p -> "1080p"
+                has720p -> "720p"
+                else -> "${Math.min(maxW, maxH)}p"
+            }
+
+            val caps = mapOf(
+                "maxResolution" to maxResLabel,
+                "maxFps" to maxFps,
+                "has4K" to has4K,
+                "has1080p" to has1080p,
+                "has720p" to has720p,
+                "supportedResolutions" to supportedResolutions,
+                "maxW" to maxW,
+                "maxH" to maxH
+            )
+            result.success(caps)
+        } catch (e: Exception) {
+            result.error("CAPS_ERROR", e.message, null)
         }
     }
 
@@ -161,7 +237,12 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
                                     capture.addTarget(imageReader.surface)
 
                                     // ── Core ISP quality parameters ──────────────────
-                                    // This signals MediaTek ISP to engage full-quality pipeline (incl. MFNR)
+                                    // Hardware & SoC Detection (MediaTek Imagiq, Qualcomm Spectre, Google Tensor)
+                                    val socHardware  = (android.os.Build.HARDWARE ?: "").lowercase()
+                                    val manufacturer = (android.os.Build.MANUFACTURER ?: "").lowercase()
+                                    val isQualcomm   = socHardware.contains("qcom") || socHardware.contains("snapdragon")
+                                    val isTensor     = socHardware.contains("gs101") || socHardware.contains("gs201") || socHardware.contains("zuma") || socHardware.contains("ripcurrent") || manufacturer.contains("google")
+
                                     capture.set(CaptureRequest.CONTROL_CAPTURE_INTENT,
                                         CameraMetadata.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
 
@@ -171,26 +252,28 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
                                     capture.set(CaptureRequest.CONTROL_AWB_MODE,
                                         CameraMetadata.CONTROL_AWB_MODE_AUTO)
 
-                                    // Noise reduction — hardware MFNR on Helio G36 when available
+                                    // Hardware Zero-Shutter-Lag (ZSL) for Qualcomm & Google Tensor
+                                    if (isQualcomm || isTensor) {
+                                        try {
+                                            capture.set(CaptureRequest.CONTROL_ENABLE_ZSL, true)
+                                        } catch (_: Exception) {}
+                                    }
+
+                                    // Noise reduction — hardware MFNR
                                     if (hasHighQualityNR) {
                                         capture.set(CaptureRequest.NOISE_REDUCTION_MODE,
                                             CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY)
-                                    } else {
-                                        // Fallback: fast NR (still better than OFF)
-                                        if (nrModes.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST)) {
-                                            capture.set(CaptureRequest.NOISE_REDUCTION_MODE,
-                                                CameraMetadata.NOISE_REDUCTION_MODE_FAST)
-                                        }
+                                    } else if (nrModes.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST)) {
+                                        capture.set(CaptureRequest.NOISE_REDUCTION_MODE,
+                                            CameraMetadata.NOISE_REDUCTION_MODE_FAST)
                                     }
 
                                     // Edge enhancement — hardware sharpening
                                     if (hasHighQualityEdge) {
                                         capture.set(CaptureRequest.EDGE_MODE,
                                             CameraMetadata.EDGE_MODE_HIGH_QUALITY)
-                                    } else {
-                                        if (edgeModes.contains(CameraMetadata.EDGE_MODE_FAST)) {
-                                            capture.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
-                                        }
+                                    } else if (edgeModes.contains(CameraMetadata.EDGE_MODE_FAST)) {
+                                        capture.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_FAST)
                                     }
 
                                     // Colour aberration correction
@@ -200,6 +283,31 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
                                     // Tone mapping
                                     capture.set(CaptureRequest.TONEMAP_MODE,
                                         CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)
+
+                                    // Lens Shading & Hot Pixel (Qualcomm & Google Tensor ISP)
+                                    try {
+                                        capture.set(CaptureRequest.SHADING_MODE,
+                                            CameraMetadata.SHADING_MODE_HIGH_QUALITY)
+                                        capture.set(CaptureRequest.HOT_PIXEL_MODE,
+                                            CameraMetadata.HOT_PIXEL_MODE_HIGH_QUALITY)
+                                    } catch (_: Exception) {}
+
+                                    // Distortion correction (Google Tensor & Snapdragon Spectre)
+                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                                        try {
+                                            capture.set(CaptureRequest.DISTORTION_CORRECTION_MODE,
+                                                CameraMetadata.DISTORTION_CORRECTION_MODE_HIGH_QUALITY)
+                                        } catch (_: Exception) {}
+                                    }
+
+                                    // Optical Image Stabilization (OIS)
+                                    val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
+                                    if (oisModes.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
+                                        try {
+                                            capture.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                                                CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                                        } catch (_: Exception) {}
+                                    }
 
                                     // Scene mode — HDR > Night > none
                                     when {

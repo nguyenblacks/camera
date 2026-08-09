@@ -43,6 +43,51 @@ class IspFeatures {
       'hqNR=$supportsHighQualityNR, hqEdge=$supportsHighQualityEdge)';
 }
 
+/// Hardware video capabilities (max resolution, FPS, supported resolution list).
+class HardwareVideoCaps {
+  final String maxResolution;
+  final int maxFps;
+  final bool has4K;
+  final bool has1080p;
+  final bool has720p;
+  final List<String> supportedResolutions;
+
+  const HardwareVideoCaps({
+    required this.maxResolution,
+    required this.maxFps,
+    required this.has4K,
+    required this.has1080p,
+    required this.has720p,
+    required this.supportedResolutions,
+  });
+
+  factory HardwareVideoCaps.fromMap(Map<Object?, Object?> map) {
+    final rawResolutions = map['supportedResolutions'];
+    final resolutions = <String>[];
+    if (rawResolutions is List) {
+      for (final item in rawResolutions) {
+        resolutions.add(item.toString());
+      }
+    }
+    if (resolutions.isEmpty) {
+      if ((map['has4K'] as bool?) ?? false) resolutions.add('4K');
+      if ((map['has1080p'] as bool?) ?? false) resolutions.add('1080p');
+      if ((map['has720p'] as bool?) ?? false) resolutions.add('720p');
+    }
+    return HardwareVideoCaps(
+      maxResolution: (map['maxResolution'] as String?) ?? '1080p',
+      maxFps: (map['maxFps'] as int?) ?? 30,
+      has4K: (map['has4K'] as bool?) ?? false,
+      has1080p: (map['has1080p'] as bool?) ?? true,
+      has720p: (map['has720p'] as bool?) ?? true,
+      supportedResolutions: resolutions,
+    );
+  }
+
+  /// Plain text summary of hardware capabilities, e.g. "1080p @ 30fps"
+  String get displayCapsText => '$maxResolution @ ${maxFps}fps';
+}
+
 /// Bridges to [Camera2CapturePlugin] on Android.
 ///
 /// Usage pattern:
@@ -53,6 +98,39 @@ class NativeCaptureService {
   static const _channel = MethodChannel('com.swavoti.camera/camera2');
 
   static IspFeatures? _cachedFeatures;
+  static final Map<String, HardwareVideoCaps> _videoCapsCache = {};
+
+  /// Query hardware video capabilities for the specified camera (front vs back).
+  static Future<HardwareVideoCaps> getVideoCapabilities({
+    required String cameraId,
+  }) async {
+    if (_videoCapsCache.containsKey(cameraId)) {
+      return _videoCapsCache[cameraId]!;
+    }
+    try {
+      final raw = await _channel.invokeMethod<Map<Object?, Object?>>(
+        'getVideoCapabilities',
+        {'cameraId': cameraId},
+      );
+      if (raw != null) {
+        final caps = HardwareVideoCaps.fromMap(raw);
+        _videoCapsCache[cameraId] = caps;
+        return caps;
+      }
+    } catch (e) {
+      debugPrint('getVideoCapabilities error: $e');
+    }
+    const fallback = HardwareVideoCaps(
+      maxResolution: '1080p',
+      maxFps: 30,
+      has4K: false,
+      has1080p: true,
+      has720p: true,
+      supportedResolutions: ['1080p', '720p'],
+    );
+    _videoCapsCache[cameraId] = fallback;
+    return fallback;
+  }
 
   /// Query which ISP quality features are available on this device.
   /// Result is cached after the first call.

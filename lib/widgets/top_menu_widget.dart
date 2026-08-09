@@ -8,12 +8,16 @@ class TopMenuWidget extends StatefulWidget {
   final CameraSettings settings;
   final ValueChanged<CameraSettings> onSettingsChanged;
   final VoidCallback? onOpenSettings;
+  final String videoCapsText;
+  final VoidCallback? onToggleVideoQuality;
 
   const TopMenuWidget({
     super.key,
     required this.settings,
     required this.onSettingsChanged,
     this.onOpenSettings,
+    this.videoCapsText = '',
+    this.onToggleVideoQuality,
   });
 
   @override
@@ -41,20 +45,26 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
     return AppTheme.accent;
   }
 
+  bool get _isHdrActive {
+    return widget.settings.hdrMode == HdrMode.on ||
+        widget.settings.hdrMode == HdrMode.auto;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Top bar row: Flash icon + chevron (left) AND Settings gear (right)
+        // Top bar row: Flash + Dropdown (left) | HDR Pill (center) | Settings / Video Specs (right)
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
+            // Left: Flash toggle dropdown trigger
             GestureDetector(
               onTap: () => setState(() => _menuOpen = !_menuOpen),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -73,36 +83,123 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                 ),
               ),
             ),
-            if (widget.onOpenSettings != null)
-              GestureDetector(
-                onTap: widget.onOpenSettings,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: const Icon(
-                    Icons.settings_outlined,
-                    color: Colors.white,
-                    size: 24,
+
+            // Center: HDR Mode pill button
+            GestureDetector(
+              onTap: () {
+                final next = widget.settings.hdrMode == HdrMode.auto
+                    ? HdrMode.on
+                    : (widget.settings.hdrMode == HdrMode.on
+                        ? HdrMode.off
+                        : HdrMode.auto);
+                widget.onSettingsChanged(widget.settings.copyWith(hdrMode: next));
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  color: _isHdrActive
+                      ? Colors.amber
+                      : const Color(0xFF1E1E1E),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _isHdrActive ? Colors.amber : Colors.white30,
+                    width: 1.0,
+                  ),
+                ),
+                child: Text(
+                  widget.settings.hdrLabel.toUpperCase(),
+                  style: TextStyle(
+                    color: _isHdrActive ? Colors.black : Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.6,
                   ),
                 ),
               ),
+            ),
+
+            // Right: Video Caps Badge (in Video mode) + Settings gear
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.settings.cameraMode == CameraMode.video &&
+                    widget.videoCapsText.isNotEmpty)
+                  GestureDetector(
+                    onTap: widget.onToggleVideoQuality,
+                    child: Container(
+                      margin: const EdgeInsets.only(right: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withAlpha(220),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white30, width: 1.0),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black45,
+                            blurRadius: 6,
+                            offset: Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.videocam_rounded, color: Colors.white, size: 14),
+                          const SizedBox(width: 5),
+                          Text(
+                            widget.videoCapsText,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                if (widget.onOpenSettings != null)
+                  GestureDetector(
+                    onTap: widget.onOpenSettings,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      child: const Icon(
+                        Icons.settings_outlined,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ],
         ),
 
-        // Quick dropdown panel
+        // Solid dark quick settings panel with clean inline option rows
         if (_menuOpen)
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
             decoration: BoxDecoration(
-              color: Colors.black.withAlpha(220),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withAlpha(30), width: 0.8),
+              color: const Color(0xFF1A1A1A), // Solid dark background
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white12, width: 1.0),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black87,
+                  blurRadius: 16,
+                  offset: Offset(0, 4),
+                )
+              ],
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                _buildSection(
+                _buildInlineRow(
                   label: 'Flash',
                   child: _buildChipRow<FlashMode>(
                     items: const [
@@ -117,7 +214,21 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                   ),
                 ),
                 _buildDivider(),
-                _buildSection(
+                _buildInlineRow(
+                  label: 'HDR',
+                  child: _buildChipRow<HdrMode>(
+                    items: const [
+                      (HdrMode.auto, 'Auto'),
+                      (HdrMode.on, 'On'),
+                      (HdrMode.off, 'Off'),
+                    ],
+                    selected: widget.settings.hdrMode,
+                    onSelected: (v) => widget.onSettingsChanged(
+                        widget.settings.copyWith(hdrMode: v)),
+                  ),
+                ),
+                _buildDivider(),
+                _buildInlineRow(
                   label: 'Timer',
                   child: _buildChipRow<TimerDelay>(
                     items: const [
@@ -131,7 +242,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                   ),
                 ),
                 _buildDivider(),
-                _buildSection(
+                _buildInlineRow(
                   label: 'Ratio',
                   child: _buildChipRow<AspectRatioMode>(
                     items: const [
@@ -146,7 +257,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                   ),
                 ),
                 _buildDivider(),
-                _buildSection(
+                _buildInlineRow(
                   label: 'Quality',
                   child: _buildChipRow<PictureQuality>(
                     items: const [
@@ -168,19 +279,19 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
     );
   }
 
-  Widget _buildSection({required String label, required Widget child}) {
+  Widget _buildInlineRow({required String label, required Widget child}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
       child: Row(
         children: [
           SizedBox(
-            width: 54,
+            width: 52,
             child: Text(
               label,
               style: const TextStyle(
-                color: Colors.white54,
+                color: Colors.white60,
                 fontSize: 12,
-                fontWeight: FontWeight.w500,
+                fontWeight: FontWeight.w600,
               ),
             ),
           ),
@@ -190,10 +301,12 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
     );
   }
 
-  Widget _buildDivider() => Container(
-        height: 0.5,
-        color: Colors.white.withAlpha(25),
-        margin: const EdgeInsets.symmetric(horizontal: 16),
+  Widget _buildDivider() => const Divider(
+        height: 1,
+        thickness: 0.5,
+        indent: 14,
+        endIndent: 14,
+        color: Colors.white10,
       );
 
   Widget _buildChipRow<T>({
@@ -213,21 +326,21 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
               margin: const EdgeInsets.only(right: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 6),
               decoration: BoxDecoration(
-                color: isSelected ? Colors.amber : Colors.white.withAlpha(18),
-                borderRadius: BorderRadius.circular(16),
+                color: isSelected ? Colors.amber : const Color(0xFF282828),
+                borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                  color: isSelected ? Colors.amber : Colors.white24,
+                  color: isSelected ? Colors.amber : Colors.white12,
                   width: 0.8,
                 ),
               ),
               child: Text(
                 item.$2,
                 style: TextStyle(
-                  color: isSelected ? Colors.black : Colors.white,
+                  color: isSelected ? Colors.black : Colors.white70,
                   fontSize: 12,
-                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
                 ),
               ),
             ),

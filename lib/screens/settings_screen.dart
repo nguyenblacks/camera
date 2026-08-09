@@ -92,6 +92,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (val) =>
                 _update(_currentSettings.copyWith(watermarkEnabled: val)),
           ),
+          _buildDivider(),
+          _buildSwitchRow(
+            title: 'Save location info',
+            subtitle: 'Embed GPS coordinates into saved photos',
+            icon: Icons.location_on_outlined,
+            value: _currentSettings.saveLocationInfo,
+            onChanged: (val) =>
+                _update(_currentSettings.copyWith(saveLocationInfo: val)),
+          ),
 
           const SizedBox(height: 24),
           _buildSectionHeader('Photo & capture'),
