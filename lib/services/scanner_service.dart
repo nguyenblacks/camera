@@ -27,7 +27,7 @@ class ScannerService {
       String? foundUrl;
       for (final barcode in barcodes) {
         if (barcode.type == BarcodeType.url) {
-          foundUrl = barcode.url?.url;
+          foundUrl = (barcode.value as BarcodeUrl?)?.url;
         } else if (barcode.rawValue != null && barcode.rawValue!.startsWith('http')) {
           foundUrl = barcode.rawValue;
         }
@@ -80,7 +80,7 @@ class ScannerService {
 
     final metadata = InputImageMetadata(
       size: Size(image.width.toDouble(), image.height.toDouble()),
-      imageRotation: inputImageRotation,
+      rotation: inputImageRotation,
       format: inputImageFormat,
       bytesPerRow: yPlane.bytesPerRow,
     );

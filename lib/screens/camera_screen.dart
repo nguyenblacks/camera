@@ -185,8 +185,8 @@ class _CameraScreenState extends State<CameraScreen>
       setState(() => _isInitialized = false);
     }
 
-    // Stop face detection stream before disposing
-    await _stopFaceStream();
+    // Stop image stream before disposing
+    await _stopImageStream();
 
     if (_controller != null) {
       try {
