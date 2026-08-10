@@ -20,6 +20,8 @@ import '../services/portrait_service.dart';
 import '../services/sound_service.dart';
 import '../services/timelapse_service.dart';
 import '../services/voice_capture_service.dart';
+import '../services/scanner_service.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../widgets/shutter_button.dart';
 import '../widgets/thumbnail_widget.dart';
 import '../widgets/top_menu_widget.dart';
@@ -86,9 +88,10 @@ class _CameraScreenState extends State<CameraScreen>
   String _videoCapsText = '';
   HardwareVideoCaps? _activeVideoCaps;
 
-  // ── Face detection state ────────────────────────────────────────────────
+  // ── Stream Services ────────────────────────────────────────────────
   final FaceDetectionService _faceService = FaceDetectionService();
-  bool _isFaceStreamActive = false;
+  final ScannerService _scannerService = ScannerService();
+  bool _isImageStreamActive = false;
   bool _isBokehExpanded = false;
 
   // UI state for right-edge panels
@@ -117,6 +120,7 @@ class _CameraScreenState extends State<CameraScreen>
     _videoRecordTimer?.cancel();
     _voiceService.dispose();
     _faceService.dispose();
+    _scannerService.dispose();
     _controller?.dispose();
     super.dispose();
   }
@@ -128,7 +132,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (_timelapseState.isRecording) {
         _timelapseService.stop(onUpdate: (s) => setState(() => _timelapseState = s));
       }
-      _stopFaceStream();
+      _stopImageStream();
       _controller?.dispose();
     } else if (state == AppLifecycleState.resumed) {
       _initCamera();
@@ -255,9 +259,9 @@ class _CameraScreenState extends State<CameraScreen>
         });
       }
 
-      // Start face detection stream if front camera or portrait mode
-      if (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) {
-        _startFaceStream();
+      // Start image stream for face detection and QR scanning
+      if (_settings.cameraMode != CameraMode.video) {
+        _startImageStream();
       }
     } catch (e) {
       debugPrint('Controller setup error: $e');
@@ -283,12 +287,13 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Face detection ──────────────────────────────────────────────────────
+  // ── Image Streaming (Face & QR) ─────────────────────────────────────────
 
-  void _startFaceStream() {
-    if (_isFaceStreamActive || _controller == null) return;
+  void _startImageStream() {
+    if (_isImageStreamActive || _controller == null) return;
     _faceService.initialize();
-    _isFaceStreamActive = true;
+    _scannerService.resume();
+    _isImageStreamActive = true;
 
     final camera = _settings.isFrontCamera
         ? _cameras.firstWhere(
@@ -298,18 +303,22 @@ class _CameraScreenState extends State<CameraScreen>
 
     try {
       _controller!.startImageStream((CameraImage image) {
-        _faceService.processImage(image, camera);
+        if (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) {
+          _faceService.processImage(image, camera);
+        }
+        _scannerService.processImage(image, camera);
       });
     } catch (e) {
-      debugPrint('Face stream start error: $e');
-      _isFaceStreamActive = false;
+      debugPrint('Image stream start error: $e');
+      _isImageStreamActive = false;
     }
   }
 
-  Future<void> _stopFaceStream() async {
-    if (!_isFaceStreamActive) return;
-    _isFaceStreamActive = false;
+  Future<void> _stopImageStream() async {
+    if (!_isImageStreamActive) return;
+    _isImageStreamActive = false;
     _faceService.stop();
+    _scannerService.stop();
     try {
       if (_controller != null && _controller!.value.isStreamingImages) {
         await _controller!.stopImageStream();
@@ -366,10 +375,10 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _startCapture() async {
     if (_controller == null || _isProcessing) return;
 
-    // Stop face stream before taking picture (can't take picture while streaming)
-    final wasFaceStreaming = _isFaceStreamActive;
-    if (wasFaceStreaming) {
-      await _stopFaceStream();
+    // Stop stream before taking picture (can't take picture while streaming)
+    final wasStreaming = _isImageStreamActive;
+    if (_isImageStreamActive) {
+      await _stopImageStream();
     }
 
     setState(() {
@@ -381,24 +390,65 @@ class _CameraScreenState extends State<CameraScreen>
     HapticFeedback.heavyImpact();
 
     try {
-      // ── JPEG path ─────────────────────────────────────────────────────────
-      final XFile f1 = await _controller!.takePicture();
-      final Uint8List raw1 = await f1.readAsBytes();
-      try { File(f1.path).deleteSync(); } catch (_) {}
+      Uint8List raw1;
+      Uint8List? raw2;
+
+      final useNative = !_settings.isFrontCamera &&
+          _settings.quality != PictureQuality.low;
+
+      if (useNative) {
+        // ── Camera2 path: full sensor resolution (true 8MP) ──────────────────
+        // Dispose Flutter controller so Camera2 can open the camera
+        final cam = _cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => _cameras.first,
+        );
+        await _controller!.dispose();
+        _controller = null;
+
+        final cameraId = '0';
+        final bytes = await NativeCaptureService.captureHighQuality(cameraId: cameraId);
+
+        // Reinitialise preview immediately
+        await _setupController(cam);
+
+        if (bytes == null || bytes.isEmpty) {
+          // Camera2 failed — fall back to Flutter takePicture
+          final XFile fallback = await _controller!.takePicture();
+          raw1 = await fallback.readAsBytes();
+          try { File(fallback.path).deleteSync(); } catch (_) {}
+        } else {
+          raw1 = bytes;
+        }
+
+        // Two-frame blend: capture a second shot via Camera2 if quality needs it
+        if (_settings.usesTwoFrames && _controller != null) {
+          await Future.delayed(const Duration(milliseconds: 180));
+          await _controller!.dispose();
+          _controller = null;
+          final bytes2 = await NativeCaptureService.captureHighQuality(cameraId: cameraId);
+          await _setupController(cam);
+          if (bytes2 != null && bytes2.isNotEmpty) raw2 = bytes2;
+        }
+      } else {
+        // ── Flutter CameraX path: front camera or low quality ─────────────────
+        final XFile f1 = await _controller!.takePicture();
+        raw1 = await f1.readAsBytes();
+        try { File(f1.path).deleteSync(); } catch (_) {}
+
+        if (_settings.usesTwoFrames) {
+          await Future.delayed(const Duration(milliseconds: 180));
+          final XFile f2 = await _controller!.takePicture();
+          raw2 = await f2.readAsBytes();
+          try { File(f2.path).deleteSync(); } catch (_) {}
+        }
+      }
 
       if (mounted) {
         setState(() {
           _thumbnailBytes = raw1;
           _thumbnailState = ThumbnailState.processing;
         });
-      }
-
-      Uint8List? raw2;
-      if (_settings.usesTwoFrames) {
-        await Future.delayed(const Duration(milliseconds: 180));
-        final XFile f2 = await _controller!.takePicture();
-        raw2 = await f2.readAsBytes();
-        try { File(f2.path).deleteSync(); } catch (_) {}
       }
 
       final finalJpeg = await EnhancementService.enhanceWithQuality(
@@ -419,9 +469,9 @@ class _CameraScreenState extends State<CameraScreen>
       _finishProcessing(null);
     } finally {
       if (mounted) setState(() => _isProcessing = false);
-      // Resume face stream if we were on front camera
-      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
-        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      // Resume stream if we were streaming
+      if (wasStreaming && mounted && _settings.cameraMode != CameraMode.video) {
+        Future.delayed(const Duration(milliseconds: 300), _startImageStream);
       }
     }
   }
@@ -431,8 +481,8 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _startPortraitCapture() async {
     if (_controller == null || _isProcessing) return;
 
-    final wasFaceStreaming = _isFaceStreamActive;
-    if (wasFaceStreaming) await _stopFaceStream();
+    final wasStreaming = _isImageStreamActive;
+    if (wasStreaming) await _stopImageStream();
 
     setState(() {
       _isProcessing = true;
@@ -470,8 +520,8 @@ class _CameraScreenState extends State<CameraScreen>
       _finishProcessing(null);
     } finally {
       if (mounted) setState(() => _isProcessing = false);
-      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
-        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      if (wasStreaming && mounted) {
+        Future.delayed(const Duration(milliseconds: 300), _startImageStream);
       }
     }
   }
@@ -481,8 +531,8 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _startNightCapture() async {
     if (_controller == null || _isProcessing) return;
 
-    final wasFaceStreaming = _isFaceStreamActive;
-    if (wasFaceStreaming) await _stopFaceStream();
+    final wasStreaming = _isImageStreamActive;
+    if (wasStreaming) await _stopImageStream();
 
     setState(() {
       _isProcessing = true;
@@ -537,8 +587,8 @@ class _CameraScreenState extends State<CameraScreen>
           _isCapturingNight = false;
         });
       }
-      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
-        Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
+      if (wasStreaming && mounted) {
+        Future.delayed(const Duration(milliseconds: 300), _startImageStream);
       }
     }
   }
@@ -678,8 +728,10 @@ class _CameraScreenState extends State<CameraScreen>
         setState(() { _isRecordingVideo = false; _videoRecordSeconds = 0; });
       }
     } else {
-      // Stop face stream before recording
-      if (_isFaceStreamActive) await _stopFaceStream();
+      // Stop stream before recording
+      if (_isImageStreamActive) {
+        await _stopImageStream();
+      }
       try {
         await _controller!.startVideoRecording();
         HapticFeedback.mediumImpact();
@@ -809,6 +861,9 @@ class _CameraScreenState extends State<CameraScreen>
           // Face detection overlay
           if (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) _buildFaceOverlay(),
 
+          // QR code detection overlay
+          _buildQrOverlay(),
+
           SafeArea(child: _buildControls()),
         ],
       ),
@@ -825,12 +880,16 @@ class _CameraScreenState extends State<CameraScreen>
       child: SizedBox(
         width: _controller!.value.previewSize!.height,
         height: _controller!.value.previewSize!.width,
-        child: _settings.activeFilter != null 
-            ? ColorFiltered(
-                colorFilter: ColorFilter.matrix(_presetToMatrix(_settings.activeFilter)!),
-                child: CameraPreview(_controller!),
-              )
-            : CameraPreview(_controller!),
+        child: Builder(builder: (context) {
+          final matrix = _presetToMatrix(_settings.activeFilter);
+          if (matrix != null) {
+            return ColorFiltered(
+              colorFilter: ColorFilter.matrix(matrix),
+              child: CameraPreview(_controller!),
+            );
+          }
+          return CameraPreview(_controller!);
+        }),
       ),
     );
 
@@ -843,6 +902,64 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
     return SizedBox.expand(child: previewWidget);
+  }
+
+  Widget _buildQrOverlay() {
+    return ValueListenableBuilder<String?>(
+      valueListenable: _scannerService.detectedUrl,
+      builder: (context, url, _) {
+        if (url == null) return const SizedBox.shrink();
+
+        // Show a floating pill in the center-ish of the screen
+        return Positioned(
+          bottom: MediaQuery.of(context).size.height * 0.4,
+          child: GestureDetector(
+            onTap: () async {
+              final uri = Uri.tryParse(url);
+              if (uri != null && await canLaunchUrl(uri)) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              } else {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Could not open link')),
+                  );
+                }
+              }
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(200),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.amber.withAlpha(150), width: 1.5),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black45, blurRadius: 10, spreadRadius: 2),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.link_rounded, color: Colors.amber, size: 20),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      'Visit: $url',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ).animate().slideY(begin: 0.5, end: 0, curve: Curves.easeOutBack, duration: 300.ms).fadeIn(),
+          ),
+        );
+      },
+    );
   }
 
   /// Draws yellow outlined rectangles on detected faces.
@@ -1228,6 +1345,7 @@ class _CameraScreenState extends State<CameraScreen>
         mainAxisSize: MainAxisSize.min,
         children: filters.map((preset) {
           final isSelected = _settings.activeFilter?.name == preset.name;
+          final matrix = _presetToMatrix(preset);
           return GestureDetector(
             onTap: () {
               setState(() {
@@ -1240,21 +1358,45 @@ class _CameraScreenState extends State<CameraScreen>
             },
             child: Container(
               margin: const EdgeInsets.symmetric(horizontal: 4),
-              width: 50,
-              height: 50,
+              width: 60,
+              height: 60,
               decoration: BoxDecoration(
                 color: Colors.black45,
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: isSelected ? Colors.amber : Colors.white30, width: isSelected ? 2 : 1),
               ),
-              alignment: Alignment.center,
-              child: Text(
-                preset.name,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: isSelected ? Colors.amber : Colors.white,
-                  fontSize: 9,
-                  fontWeight: FontWeight.bold,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (matrix != null)
+                      ColorFiltered(
+                        colorFilter: ColorFilter.matrix(matrix),
+                        child: Image.asset('assets/filter_preview.png', fit: BoxFit.cover),
+                      )
+                    else
+                      Image.asset('assets/filter_preview.png', fit: BoxFit.cover),
+                    Align(
+                      alignment: Alignment.bottomCenter,
+                      child: Container(
+                        width: double.infinity,
+                        color: Colors.black54,
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Text(
+                          preset.name,
+                          textAlign: TextAlign.center,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: isSelected ? Colors.amber : Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),

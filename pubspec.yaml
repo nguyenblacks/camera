@@ -21,8 +21,10 @@ dependencies:
   open_file: ^3.3.2
   google_mlkit_face_detection: ^0.11.1
   google_mlkit_selfie_segmentation: ^0.8.0
+  google_mlkit_barcode_scanning: ^0.12.1
   geolocator: ^13.0.2
   color_filter_extension: ^1.0.1
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:
@@ -47,3 +49,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icon.png
+    - assets/filter_preview.png

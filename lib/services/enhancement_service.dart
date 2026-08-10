@@ -97,30 +97,25 @@ Uint8List? _qualityPipeline(_QualityParams p) {
   return Uint8List.fromList(img.encodeJpg(base, quality: jpegQuality));
 }
 
-/// Averages 2 frames to reduce hardware sensor noise
 img.Image _averageFrames(img.Image a, img.Image b) {
   final int w = a.width;
   final int h = a.height;
-  final out = img.Image(width: w, height: h);
 
   final bSrc = (b.width == w && b.height == h)
       ? b
       : img.copyResize(b, width: w, height: h);
 
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      final pa = a.getPixel(x, y);
-      final pb = bSrc.getPixel(x, y);
-      out.setPixelRgb(
-        x,
-        y,
-        ((pa.r + pb.r) / 2).round().clamp(0, 255),
-        ((pa.g + pb.g) / 2).round().clamp(0, 255),
-        ((pa.b + pb.b) / 2).round().clamp(0, 255),
-      );
-    }
+  final aIter = a.iterator;
+  final bIter = bSrc.iterator;
+
+  while (aIter.moveNext() && bIter.moveNext()) {
+    final pa = aIter.current;
+    final pb = bIter.current;
+    pa.r = ((pa.r + pb.r) / 2).clamp(0, 255);
+    pa.g = ((pa.g + pb.g) / 2).clamp(0, 255);
+    pa.b = ((pa.b + pb.b) / 2).clamp(0, 255);
   }
-  return out;
+  return a;
 }
 
 /// Applies subtle color warmth + threshold-masked edge sharpening.
@@ -156,39 +151,27 @@ img.Image _applyNaturalEnhancement(img.Image src, PictureQuality q) {
   }
 }
 
-/// Threshold-masked unsharp mask:
-/// Only sharpens pixels where high-frequency detail exceeds [threshold].
-/// Leaves flat areas (skin, sky, background shadows) smooth without amplifying noise.
 img.Image _thresholdUnsharpMask(img.Image src, {required double amount, required int threshold}) {
   final blurred = img.gaussianBlur(src, radius: 1);
-  final out = img.Image(width: src.width, height: src.height);
+  final srcIter = src.iterator;
+  final blurIter = blurred.iterator;
 
-  for (int y = 0; y < src.height; y++) {
-    for (int x = 0; x < src.width; x++) {
-      final orig = src.getPixel(x, y);
-      final blur = blurred.getPixel(x, y);
+  while (srcIter.moveNext() && blurIter.moveNext()) {
+    final pixel = srcIter.current;
+    final blur = blurIter.current;
 
-      final diffR = (orig.r - blur.r).abs();
-      final diffG = (orig.g - blur.g).abs();
-      final diffB = (orig.b - blur.b).abs();
-      final maxDiff = diffR > diffG ? (diffR > diffB ? diffR : diffB) : (diffG > diffB ? diffG : diffB);
+    final diffR = (pixel.r - blur.r).abs();
+    final diffG = (pixel.g - blur.g).abs();
+    final diffB = (pixel.b - blur.b).abs();
+    final maxDiff = diffR > diffG ? (diffR > diffB ? diffR : diffB) : (diffG > diffB ? diffG : diffB);
 
-      if (maxDiff > threshold) {
-        // High-contrast edge detected — apply gentle sharpening
-        out.setPixelRgb(
-          x,
-          y,
-          (orig.r + amount * (orig.r - blur.r)).round().clamp(0, 255),
-          (orig.g + amount * (orig.g - blur.g)).round().clamp(0, 255),
-          (orig.b + amount * (orig.b - blur.b)).round().clamp(0, 255),
-        );
-      } else {
-        // Flat noise region — keep original pixel untouched
-        out.setPixelRgb(x, y, orig.r.toInt(), orig.g.toInt(), orig.b.toInt());
-      }
+    if (maxDiff > threshold) {
+      pixel.r = (pixel.r + amount * (pixel.r - blur.r)).clamp(0, 255);
+      pixel.g = (pixel.g + amount * (pixel.g - blur.g)).clamp(0, 255);
+      pixel.b = (pixel.b + amount * (pixel.b - blur.b)).clamp(0, 255);
     }
   }
-  return out;
+  return src;
 }
 
 img.Image _applyWarmth(
@@ -197,20 +180,12 @@ img.Image _applyWarmth(
   required double green,
   required double blue,
 }) {
-  final out = img.Image(width: src.width, height: src.height);
-  for (int y = 0; y < src.height; y++) {
-    for (int x = 0; x < src.width; x++) {
-      final p = src.getPixel(x, y);
-      out.setPixelRgb(
-        x,
-        y,
-        (p.r * red).round().clamp(0, 255),
-        (p.g * green).round().clamp(0, 255),
-        (p.b * blue).round().clamp(0, 255),
-      );
-    }
+  for (final pixel in src) {
+    pixel.r = (pixel.r * red).clamp(0, 255);
+    pixel.g = (pixel.g * green).clamp(0, 255);
+    pixel.b = (pixel.b * blue).clamp(0, 255);
   }
-  return out;
+  return src;
 }
 
 img.Image _drawWatermark(img.Image src, String deviceModel) {
@@ -265,31 +240,19 @@ Uint8List? _encodeRgba(_RgbaParams p) {
   return Uint8List.fromList(img.encodeJpg(image, quality: 85));
 }
 
-/// Applies a 5x4 color matrix (standard Flutter ColorMatrix) to the image
 img.Image _applyColorMatrix(img.Image src, List<double> matrix) {
-  final out = img.Image(width: src.width, height: src.height);
-  for (int y = 0; y < src.height; y++) {
-    for (int x = 0; x < src.width; x++) {
-      final p = src.getPixel(x, y);
-      final r = p.r;
-      final g = p.g;
-      final b = p.b;
-      // matrix is 20 elements. 
-      // row 1: R
-      final newR = r * matrix[0] + g * matrix[1] + b * matrix[2] + 255 * matrix[3] + matrix[4];
-      // row 2: G
-      final newG = r * matrix[5] + g * matrix[6] + b * matrix[7] + 255 * matrix[8] + matrix[9];
-      // row 3: B
-      final newB = r * matrix[10] + g * matrix[11] + b * matrix[12] + 255 * matrix[13] + matrix[14];
-      
-      out.setPixelRgb(
-        x,
-        y,
-        newR.round().clamp(0, 255),
-        newG.round().clamp(0, 255),
-        newB.round().clamp(0, 255),
-      );
-    }
+  for (final pixel in src) {
+    final r = pixel.r;
+    final g = pixel.g;
+    final b = pixel.b;
+    
+    final newR = r * matrix[0] + g * matrix[1] + b * matrix[2] + 255 * matrix[3] + matrix[4];
+    final newG = r * matrix[5] + g * matrix[6] + b * matrix[7] + 255 * matrix[8] + matrix[9];
+    final newB = r * matrix[10] + g * matrix[11] + b * matrix[12] + 255 * matrix[13] + matrix[14];
+    
+    pixel.r = newR.clamp(0, 255);
+    pixel.g = newG.clamp(0, 255);
+    pixel.b = newB.clamp(0, 255);
   }
-  return out;
+  return src;
 }

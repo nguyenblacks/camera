@@ -85,7 +85,8 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
             ),
 
             // Center: HDR Mode text button
-            GestureDetector(
+            if (widget.settings.cameraMode != CameraMode.video)
+              GestureDetector(
               onTap: () {
                 final next = widget.settings.hdrMode == HdrMode.auto
                     ? HdrMode.on
@@ -171,45 +172,52 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                 _buildInlineRow(
                   label: 'Flash',
                   child: _buildChipRow<FlashMode>(
-                    items: const [
-                      (FlashMode.off, 'Off'),
-                      (FlashMode.auto, 'Auto'),
-                      (FlashMode.always, 'On'),
-                      (FlashMode.torch, 'Torch'),
-                    ],
+                    items: widget.settings.cameraMode == CameraMode.video 
+                        ? const [
+                            (FlashMode.off, 'Off'),
+                            (FlashMode.torch, 'Torch'),
+                          ]
+                        : const [
+                            (FlashMode.off, 'Off'),
+                            (FlashMode.auto, 'Auto'),
+                            (FlashMode.always, 'On'),
+                            (FlashMode.torch, 'Torch'),
+                          ],
                     selected: widget.settings.flashMode,
                     onSelected: (v) => widget.onSettingsChanged(
                         widget.settings.copyWith(flashMode: v)),
                   ),
                 ),
-                _buildDivider(),
-                _buildInlineRow(
-                  label: 'HDR',
-                  child: _buildChipRow<HdrMode>(
-                    items: const [
-                      (HdrMode.auto, 'Auto'),
-                      (HdrMode.on, 'On'),
-                      (HdrMode.off, 'Off'),
-                    ],
-                    selected: widget.settings.hdrMode,
-                    onSelected: (v) => widget.onSettingsChanged(
-                        widget.settings.copyWith(hdrMode: v)),
+                if (widget.settings.cameraMode != CameraMode.video) ...[
+                  _buildDivider(),
+                  _buildInlineRow(
+                    label: 'HDR',
+                    child: _buildChipRow<HdrMode>(
+                      items: const [
+                        (HdrMode.auto, 'Auto'),
+                        (HdrMode.on, 'On'),
+                        (HdrMode.off, 'Off'),
+                      ],
+                      selected: widget.settings.hdrMode,
+                      onSelected: (v) => widget.onSettingsChanged(
+                          widget.settings.copyWith(hdrMode: v)),
+                    ),
                   ),
-                ),
-                _buildDivider(),
-                _buildInlineRow(
-                  label: 'Timer',
-                  child: _buildChipRow<TimerDelay>(
-                    items: const [
-                      (TimerDelay.off, 'Off'),
-                      (TimerDelay.three, '3s'),
-                      (TimerDelay.ten, '10s'),
-                    ],
-                    selected: widget.settings.timerDelay,
-                    onSelected: (v) => widget.onSettingsChanged(
-                        widget.settings.copyWith(timerDelay: v)),
+                  _buildDivider(),
+                  _buildInlineRow(
+                    label: 'Timer',
+                    child: _buildChipRow<TimerDelay>(
+                      items: const [
+                        (TimerDelay.off, 'Off'),
+                        (TimerDelay.three, '3s'),
+                        (TimerDelay.ten, '10s'),
+                      ],
+                      selected: widget.settings.timerDelay,
+                      onSelected: (v) => widget.onSettingsChanged(
+                          widget.settings.copyWith(timerDelay: v)),
+                    ),
                   ),
-                ),
+                ],
                 _buildDivider(),
                 _buildInlineRow(
                   label: 'Ratio',
