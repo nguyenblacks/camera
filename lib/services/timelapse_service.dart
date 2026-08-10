@@ -29,6 +29,7 @@ class TimelapseService {
     required int intervalSeconds,
     required Future<void> Function() onFrameTrigger,
     required void Function(TimelapseState state) onUpdate,
+    int maxDurationSeconds = 0,
   }) {
     if (_isRecording) return;
 
@@ -66,6 +67,9 @@ class TimelapseService {
         capturedFrames: _capturedFrames,
         elapsedSeconds: _elapsedSeconds,
       ));
+      if (maxDurationSeconds > 0 && _elapsedSeconds >= maxDurationSeconds) {
+        stop(onUpdate: onUpdate);
+      }
     });
   }
 

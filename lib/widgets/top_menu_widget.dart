@@ -84,7 +84,7 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
               ),
             ),
 
-            // Center: HDR Mode pill button
+            // Center: HDR Mode text button
             GestureDetector(
               onTap: () {
                 final next = widget.settings.hdrMode == HdrMode.auto
@@ -94,24 +94,13 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                         : HdrMode.auto);
                 widget.onSettingsChanged(widget.settings.copyWith(hdrMode: next));
               },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
+              child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                decoration: BoxDecoration(
-                  color: _isHdrActive
-                      ? Colors.amber
-                      : const Color(0xFF1E1E1E),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: _isHdrActive ? Colors.amber : Colors.white30,
-                    width: 1.0,
-                  ),
-                ),
                 child: Text(
                   widget.settings.hdrLabel.toUpperCase(),
                   style: TextStyle(
-                    color: _isHdrActive ? Colors.black : Colors.white70,
-                    fontSize: 11,
+                    color: _isHdrActive ? Colors.amber : Colors.white70,
+                    fontSize: 12,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 0.6,
                   ),
@@ -127,36 +116,16 @@ class _TopMenuWidgetState extends State<TopMenuWidget> {
                     widget.videoCapsText.isNotEmpty)
                   GestureDetector(
                     onTap: widget.onToggleVideoQuality,
-                    child: Container(
-                      margin: const EdgeInsets.only(right: 4),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.redAccent.withAlpha(220),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.white30, width: 1.0),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Colors.black45,
-                            blurRadius: 6,
-                            offset: Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.videocam_rounded, color: Colors.white, size: 14),
-                          const SizedBox(width: 5),
-                          Text(
-                            widget.videoCapsText,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ],
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 4, left: 10, top: 6, bottom: 6),
+                      child: Text(
+                        widget.videoCapsText,
+                        style: const TextStyle(
+                          color: Colors.amber,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.5,
+                        ),
                       ),
                     ),
                   ),

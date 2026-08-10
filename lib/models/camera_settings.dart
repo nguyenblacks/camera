@@ -1,4 +1,5 @@
 import 'package:camera/camera.dart';
+import 'package:color_filter_extension/color_filter_extension.dart';
 
 enum CameraMode { photo, portrait, video, night, timelapse }
 
@@ -35,6 +36,8 @@ class CameraSettings {
   bool saveLocationInfo;
   double bokehBlurLevel; // 0.0 (no blur) to 1.0 (max blur f/1.4)
   String bokehFStop;     // 'f/1.4', 'f/2.0', 'f/2.8', 'f/4.0', 'f/8.0'
+  ColorFiltersPreset? activeFilter;
+  int timelapseDurationSeconds;
 
   CameraSettings({
     this.cameraMode = CameraMode.photo,
@@ -55,9 +58,11 @@ class CameraSettings {
     this.saveLocationInfo = false,
     this.bokehBlurLevel = 0.6,
     this.bokehFStop = 'f/2.8',
+    this.activeFilter,
+    this.timelapseDurationSeconds = 0, // 0 = infinite
   });
 
-  bool get usesTwoFrames => quality != PictureQuality.low;
+  bool get usesTwoFrames => false;
 
   String get qualityLabel {
     switch (quality) {
@@ -204,6 +209,8 @@ class CameraSettings {
     bool? saveLocationInfo,
     double? bokehBlurLevel,
     String? bokehFStop,
+    ColorFiltersPreset? activeFilter,
+    int? timelapseDurationSeconds,
   }) {
     return CameraSettings(
       cameraMode: cameraMode ?? this.cameraMode,
@@ -225,6 +232,8 @@ class CameraSettings {
       saveLocationInfo: saveLocationInfo ?? this.saveLocationInfo,
       bokehBlurLevel: bokehBlurLevel ?? this.bokehBlurLevel,
       bokehFStop: bokehFStop ?? this.bokehFStop,
+      activeFilter: activeFilter ?? this.activeFilter,
+      timelapseDurationSeconds: timelapseDurationSeconds ?? this.timelapseDurationSeconds,
     );
   }
 }

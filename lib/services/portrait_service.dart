@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
+import 'package:path_provider/path_provider.dart';
 import 'package:google_mlkit_selfie_segmentation/google_mlkit_selfie_segmentation.dart';
 
 /// Service for computational portrait mode:
@@ -75,17 +77,15 @@ class PortraitService {
   static Future<Float32List?> _generateSegmentationMask(
       Uint8List imageBytes, int targetW, int targetH) async {
     try {
-      final inputImage = InputImage.fromBytes(
-        bytes: imageBytes,
-        metadata: InputImageMetadata(
-          size: Size(targetW.toDouble(), targetH.toDouble()),
-          rotation: InputImageRotation.rotation0deg,
-          format: InputImageFormat.nv21,
-          bytesPerRow: targetW * 4,
-        ),
-      );
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = File('${tempDir.path}/seg_temp_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await tempFile.writeAsBytes(imageBytes);
+
+      final inputImage = InputImage.fromFilePath(tempFile.path);
 
       final segmentationMask = await _getSegmenter.processImage(inputImage);
+      try { tempFile.deleteSync(); } catch (_) {}
+      
       if (segmentationMask == null) return null;
 
       final maskW = segmentationMask.width;
@@ -105,7 +105,8 @@ class PortraitService {
         }
       }
       return floatMask;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Segmentation mask error: $e');
       return null;
     }
   }

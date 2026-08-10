@@ -22,6 +22,7 @@ dependencies:
   google_mlkit_face_detection: ^0.11.1
   google_mlkit_selfie_segmentation: ^0.8.0
   geolocator: ^13.0.2
+  color_filter_extension: ^1.0.1
 
 dev_dependencies:
   flutter_test:

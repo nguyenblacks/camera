@@ -5,10 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:gal/gal.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:color_filter_extension/color_filter_extension.dart';
 
 import '../models/camera_settings.dart';
 import '../services/device_info_service.dart';
@@ -89,6 +89,19 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Face detection state ────────────────────────────────────────────────
   final FaceDetectionService _faceService = FaceDetectionService();
   bool _isFaceStreamActive = false;
+  bool _isBokehExpanded = false;
+
+  // UI state for right-edge panels
+  bool _showFilterCarousel = false;
+  bool _showTimelapseSettings = false;
+
+  // DNG support
+  bool _supportsRawCapture = false;
+
+  static List<double>? _presetToMatrix(ColorFiltersPreset? preset) {
+    if (preset == null || preset.filters.isEmpty) return null;
+    return ColorFilterExt.merged(preset.filters).matrix;
+  }
 
   @override
   void initState() {
@@ -152,6 +165,11 @@ class _CameraScreenState extends State<CameraScreen>
       final isp = await NativeCaptureService.getSupportedFeatures();
       debugPrint('Device ISP features: $isp');
 
+      // Check if device supports true RAW/DNG capture (Camera2 RAW_SENSOR)
+      final rawSupported = await NativeCaptureService.supportsRawCapture();
+      if (mounted) setState(() => _supportsRawCapture = rawSupported);
+      debugPrint('DNG/RAW capture supported: $rawSupported');
+
       await _setupController(
         _settings.isFrontCamera
             ? _cameras.firstWhere(
@@ -201,7 +219,7 @@ class _CameraScreenState extends State<CameraScreen>
           break;
       }
     } else {
-      preset = ResolutionPreset.high;
+      preset = _settings.quality == PictureQuality.low ? ResolutionPreset.veryHigh : ResolutionPreset.max;
     }
 
     final newController = CameraController(
@@ -245,8 +263,8 @@ class _CameraScreenState extends State<CameraScreen>
         });
       }
 
-      // Start face detection stream if front camera
-      if (_settings.isFrontCamera) {
+      // Start face detection stream if front camera or portrait mode
+      if (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) {
         _startFaceStream();
       }
     } catch (e) {
@@ -351,7 +369,7 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
-  // ── Photo capture (2-frame blend) ─────────────────────────────────────────
+  // ── Photo capture ─────────────────────────────────────────────────────────
 
   Future<void> _startCapture() async {
     if (_controller == null || _isProcessing) return;
@@ -371,6 +389,40 @@ class _CameraScreenState extends State<CameraScreen>
     HapticFeedback.heavyImpact();
 
     try {
+      // ── Try true RAW/DNG capture first (rear camera only) ──────────────────
+      if (_supportsRawCapture && !_settings.isFrontCamera) {
+        final cameraId = '0';
+
+        // Must release the Flutter controller first so Camera2 can open
+        await _controller!.dispose();
+        _controller = null;
+
+        final dngResult = await NativeCaptureService.captureDng(cameraId: cameraId);
+
+        // Reinitialise the Flutter preview immediately after
+        final cam = _cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => _cameras.first,
+        );
+        await _setupController(cam);
+
+        if (dngResult != null) {
+          if (mounted) {
+            setState(() {
+              _thumbnailBytes = dngResult.dngBytes;
+              _thumbnailState = ThumbnailState.processing;
+            });
+          }
+          // Save DNG directly — no JPEG processing pipeline
+          await _saveToGallery(dngResult.dngBytes, isDng: true);
+          _finishProcessing(dngResult.dngBytes);
+          return;
+        }
+        // If DNG failed, fall through to JPEG path below
+        debugPrint('DNG capture failed, falling back to JPEG');
+      }
+
+      // ── JPEG path (front camera, or DNG not supported/failed) ─────────────
       final XFile f1 = await _controller!.takePicture();
       final Uint8List raw1 = await f1.readAsBytes();
       try { File(f1.path).deleteSync(); } catch (_) {}
@@ -395,6 +447,7 @@ class _CameraScreenState extends State<CameraScreen>
         frame2: raw2,
         quality: _settings.quality,
         deviceModel: _settings.watermarkEnabled ? _deviceModel : null,
+        filterMatrix: _presetToMatrix(_settings.activeFilter),
       );
 
       if (finalJpeg != null) {
@@ -408,7 +461,7 @@ class _CameraScreenState extends State<CameraScreen>
     } finally {
       if (mounted) setState(() => _isProcessing = false);
       // Resume face stream if we were on front camera
-      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
         Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
       }
     }
@@ -458,7 +511,7 @@ class _CameraScreenState extends State<CameraScreen>
       _finishProcessing(null);
     } finally {
       if (mounted) setState(() => _isProcessing = false);
-      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
         Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
       }
     }
@@ -525,7 +578,7 @@ class _CameraScreenState extends State<CameraScreen>
           _isCapturingNight = false;
         });
       }
-      if (wasFaceStreaming && _settings.isFrontCamera && mounted) {
+      if (wasFaceStreaming && (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) && mounted) {
         Future.delayed(const Duration(milliseconds: 300), _startFaceStream);
       }
     }
@@ -566,6 +619,7 @@ class _CameraScreenState extends State<CameraScreen>
               frame1: bytes,
               quality: PictureQuality.low,
               deviceModel: _settings.watermarkEnabled ? _deviceModel : null,
+              filterMatrix: _presetToMatrix(_settings.activeFilter),
             );
 
             if (enhanced != null) {
@@ -583,13 +637,15 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _saveToGallery(Uint8List jpegBytes) async {
+  Future<void> _saveToGallery(Uint8List bytes, {bool isDng = false}) async {
     try {
       final dir = await getTemporaryDirectory();
-      final path =
-          '${dir.path}/swavoti_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      await File(path).writeAsBytes(jpegBytes);
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final ext = isDng ? 'dng' : 'jpg';
+      final path = '${dir.path}/swavoti_$ts.$ext';
+      await File(path).writeAsBytes(bytes);
       _lastSavedFilePath = path;
+      // Gal.putImage supports DNG as well as JPEG on Android
       await Gal.putImage(path, album: 'Swavoti Camera');
     } catch (e) {
       debugPrint('Save error: $e');
@@ -793,8 +849,8 @@ class _CameraScreenState extends State<CameraScreen>
           if (_countdownValue > 0) _buildCountdown(),
           if (_voiceListening) _buildVoiceOverlay(),
 
-          // Face detection overlay (only on front camera)
-          if (_settings.isFrontCamera) _buildFaceOverlay(),
+          // Face detection overlay
+          if (_settings.isFrontCamera || _settings.cameraMode == CameraMode.portrait) _buildFaceOverlay(),
 
           SafeArea(child: _buildControls()),
         ],
@@ -812,7 +868,12 @@ class _CameraScreenState extends State<CameraScreen>
       child: SizedBox(
         width: _controller!.value.previewSize!.height,
         height: _controller!.value.previewSize!.width,
-        child: CameraPreview(_controller!),
+        child: _settings.activeFilter != null 
+            ? ColorFiltered(
+                colorFilter: ColorFilter.matrix(_presetToMatrix(_settings.activeFilter)!),
+                child: CameraPreview(_controller!),
+              )
+            : CameraPreview(_controller!),
       ),
     );
 
@@ -837,9 +898,11 @@ class _CameraScreenState extends State<CameraScreen>
           builder: (context, constraints) {
             return Stack(
               children: faces.map((face) {
-                // Mirror the x-axis for front camera
+                // Mirror the x-axis for front camera only
                 final rect = face.normalizedRect;
-                final left = (1.0 - rect.right) * constraints.maxWidth;
+                final left = _settings.isFrontCamera
+                    ? (1.0 - rect.right) * constraints.maxWidth
+                    : rect.left * constraints.maxWidth;
                 final top = rect.top * constraints.maxHeight;
                 final width = rect.width * constraints.maxWidth;
                 final height = rect.height * constraints.maxHeight;
@@ -1009,16 +1072,40 @@ class _CameraScreenState extends State<CameraScreen>
         ),
         const Spacer(),
 
-        // Zoom control (rear camera only)
-        if (!_settings.isFrontCamera && _maxZoom > 1.0)
+        // Zoom control, Filters, or Timelapse settings (rear camera only)
+        if (!_settings.isFrontCamera)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: ZoomControlWidget(
-              currentZoom: _currentZoom,
-              minZoom: _minZoom,
-              maxZoom: _maxZoom,
-              hasUltraWide: _hasUltraWide,
-              onZoomChanged: _setZoom,
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                // Keep the height structured by using an invisible placeholder if needed,
+                // but the child widgets themselves have height.
+                Container(
+                  width: double.infinity,
+                  height: 50, // ensures the stack has at least 50px height
+                  alignment: Alignment.bottomCenter,
+                  child: () {
+                    if (_showFilterCarousel) return _buildFilterCarousel();
+                    if (_showTimelapseSettings) return _buildTimelapseSettingsUI();
+                    if (_maxZoom > 1.0) {
+                      return ZoomControlWidget(
+                        currentZoom: _currentZoom,
+                        minZoom: _minZoom,
+                        maxZoom: _maxZoom,
+                        hasUltraWide: _hasUltraWide,
+                        onZoomChanged: _setZoom,
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  }(),
+                ),
+                Positioned(
+                  right: 16,
+                  bottom: 5,
+                  child: _buildRightEdgeToggle(),
+                ),
+              ],
             ),
           ),
 
@@ -1066,7 +1153,6 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildModeSelector() {
     final modes = [
       (CameraMode.photo, 'PHOTO'),
-      (CameraMode.portrait, 'PORTRAIT'),
       (CameraMode.video, 'VIDEO'),
       (CameraMode.night, 'NIGHT'),
       (CameraMode.timelapse, 'TIMELAPSE'),
@@ -1135,92 +1221,236 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  Widget _buildRightEdgeToggle() {
+    if (_settings.cameraMode == CameraMode.photo) {
+      return GestureDetector(
+        onTap: () {
+          setState(() {
+            _showFilterCarousel = !_showFilterCarousel;
+            _showTimelapseSettings = false;
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.black.withAlpha(150),
+            shape: BoxShape.circle,
+            border: Border.all(color: _showFilterCarousel ? Colors.amber : Colors.white30),
+          ),
+          child: Icon(Icons.edit, color: _showFilterCarousel ? Colors.amber : Colors.white, size: 20),
+        ),
+      );
+    } else if (_settings.cameraMode == CameraMode.timelapse) {
+      return GestureDetector(
+        onTap: () {
+          setState(() {
+            _showTimelapseSettings = !_showTimelapseSettings;
+            _showFilterCarousel = false;
+          });
+        },
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.black.withAlpha(150),
+            shape: BoxShape.circle,
+            border: Border.all(color: _showTimelapseSettings ? Colors.amber : Colors.white30),
+          ),
+          child: Icon(Icons.speed, color: _showTimelapseSettings ? Colors.amber : Colors.white, size: 20),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildFilterCarousel() {
+    final filters = presetFiltersList.take(15).toList();
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const BouncingScrollPhysics(),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: filters.map((preset) {
+          final isSelected = _settings.activeFilter?.name == preset.name;
+          return GestureDetector(
+            onTap: () {
+              setState(() {
+                if (isSelected) {
+                  _settings.activeFilter = null;
+                } else {
+                  _settings.activeFilter = preset;
+                }
+              });
+            },
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: 50,
+              height: 50,
+              decoration: BoxDecoration(
+                color: Colors.black45,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: isSelected ? Colors.amber : Colors.white30, width: isSelected ? 2 : 1),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                preset.name,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: isSelected ? Colors.amber : Colors.white,
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.2, end: 0);
+  }
+
+  Widget _buildTimelapseSettingsUI() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withAlpha(180),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.timer_outlined, color: Colors.white70, size: 16),
+          const SizedBox(width: 8),
+          DropdownButton<int>(
+            value: _settings.timelapseIntervalSeconds,
+            dropdownColor: Colors.grey[900],
+            underline: const SizedBox.shrink(),
+            icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+            style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+            items: [1, 2, 3, 5, 10].map((int val) {
+              return DropdownMenuItem<int>(
+                value: val,
+                child: Text('${val}s gap'),
+              );
+            }).toList(),
+            onChanged: (val) {
+              if (val != null) {
+                _onSettingsChanged(_settings.copyWith(timelapseIntervalSeconds: val));
+              }
+            },
+          ),
+          const SizedBox(width: 12),
+          const Icon(Icons.timelapse, color: Colors.white70, size: 16),
+          const SizedBox(width: 8),
+          DropdownButton<int>(
+            value: _settings.timelapseDurationSeconds,
+            dropdownColor: Colors.grey[900],
+            underline: const SizedBox.shrink(),
+            icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+            style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+            items: const [
+              DropdownMenuItem<int>(value: 0, child: Text('Infinite')),
+              DropdownMenuItem<int>(value: 10, child: Text('10s')),
+              DropdownMenuItem<int>(value: 30, child: Text('30s')),
+              DropdownMenuItem<int>(value: 60, child: Text('1m')),
+              DropdownMenuItem<int>(value: 300, child: Text('5m')),
+            ],
+            onChanged: (val) {
+              if (val != null) {
+                _onSettingsChanged(_settings.copyWith(timelapseDurationSeconds: val));
+              }
+            },
+          ),
+        ],
+      ),
+    ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.2, end: 0);
+  }
+
   Widget _buildBokehPill() {
     final fStops = ['f/1.4', 'f/2.0', 'f/2.8', 'f/4.0', 'f/8.0'];
     final blurForFStop = {'f/1.4': 1.0, 'f/2.0': 0.78, 'f/2.8': 0.6, 'f/4.0': 0.38, 'f/8.0': 0.18};
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // F-stop selector row
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: fStops.map((fStop) {
-                final isActive = _settings.bokehFStop == fStop;
-                return GestureDetector(
-                  onTap: () {
-                    final blur = blurForFStop[fStop] ?? 0.6;
-                    setState(() {
-                      _settings = _settings.copyWith(
-                        bokehFStop: fStop,
-                        bokehBlurLevel: blur,
-                      );
-                    });
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    margin: const EdgeInsets.symmetric(horizontal: 5),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: isActive
-                          ? const Color(0xFFFF6B9D).withAlpha(220)
-                          : Colors.black.withAlpha(140),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: isActive
-                            ? const Color(0xFFFF6B9D)
-                            : Colors.white24,
-                        width: 1.2,
+          if (_isBokehExpanded)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: fStops.map((fStop) {
+                  final isActive = _settings.bokehFStop == fStop;
+                  return GestureDetector(
+                    onTap: () {
+                      final blur = blurForFStop[fStop] ?? 0.6;
+                      setState(() {
+                        _settings = _settings.copyWith(
+                          bokehFStop: fStop,
+                          bokehBlurLevel: blur,
+                        );
+                        _isBokehExpanded = false;
+                      });
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      margin: const EdgeInsets.symmetric(horizontal: 6),
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black.withAlpha(140),
+                        border: Border.all(
+                          color: isActive ? Colors.amber : Colors.white30,
+                          width: isActive ? 2.0 : 1.0,
+                        ),
                       ),
-                      boxShadow: isActive
-                          ? [
-                              BoxShadow(
-                                color: const Color(0xFFFF6B9D).withAlpha(120),
-                                blurRadius: 10,
-                                spreadRadius: 1,
-                              )
-                            ]
-                          : [],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.camera_rounded,
-                          size: 11,
-                          color: isActive ? Colors.white : Colors.white54,
+                      alignment: Alignment.center,
+                      child: Text(
+                        fStop,
+                        style: TextStyle(
+                          color: isActive ? Colors.amber : Colors.white70,
+                          fontSize: 12,
+                          fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
                         ),
-                        const SizedBox(width: 4),
-                        Text(
-                          fStop,
-                          style: TextStyle(
-                            color: isActive ? Colors.white : Colors.white54,
-                            fontSize: 12,
-                            fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
-                            letterSpacing: 0.3,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-                );
-              }).toList(),
+                  );
+                }).toList(),
+              ),
+            )
+          else
+            GestureDetector(
+              onTap: () {
+                setState(() {
+                  _isBokehExpanded = true;
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withAlpha(150),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: Colors.white30, width: 1.0),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.camera_rounded, size: 16, color: Colors.white),
+                    const SizedBox(width: 6),
+                    Text(
+                      _settings.bokehFStop,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'PORTRAIT DEPTH',
-            style: TextStyle(
-              color: const Color(0xFFFF6B9D).withAlpha(200),
-              fontSize: 9,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.8,
-            ),
-          ),
         ],
       ),
     ).animate().fadeIn(duration: 220.ms).slideY(begin: 0.08, end: 0);

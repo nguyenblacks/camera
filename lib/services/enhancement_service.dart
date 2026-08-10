@@ -16,6 +16,7 @@ class EnhancementService {
     Uint8List? frame2,
     required PictureQuality quality,
     String? deviceModel,
+    List<double>? filterMatrix,
   }) async {
     try {
       return await compute(
@@ -25,6 +26,7 @@ class EnhancementService {
           frame2: frame2,
           quality: quality,
           deviceModel: deviceModel,
+          filterMatrix: filterMatrix,
         ),
       );
     } catch (e) {
@@ -47,12 +49,14 @@ class _QualityParams {
   final Uint8List? frame2;
   final PictureQuality quality;
   final String? deviceModel;
+  final List<double>? filterMatrix;
 
   _QualityParams({
     required this.frame1,
     this.frame2,
     required this.quality,
     this.deviceModel,
+    this.filterMatrix,
   });
 }
 
@@ -79,7 +83,12 @@ Uint8List? _qualityPipeline(_QualityParams p) {
   // 2. Clean, natural enhancement (denoised edge sharpening + warm balance)
   base = _applyNaturalEnhancement(base, p.quality);
 
-  // 3. Optional device watermark
+  // 3. Apply custom color matrix filter if selected
+  if (p.filterMatrix != null && p.filterMatrix!.length == 20) {
+    base = _applyColorMatrix(base, p.filterMatrix!);
+  }
+
+  // 4. Optional device watermark
   if (p.deviceModel != null && p.deviceModel!.isNotEmpty) {
     base = _drawWatermark(base, p.deviceModel!);
   }
@@ -254,4 +263,33 @@ Uint8List? _encodeRgba(_RgbaParams p) {
     }
   }
   return Uint8List.fromList(img.encodeJpg(image, quality: 85));
+}
+
+/// Applies a 5x4 color matrix (standard Flutter ColorMatrix) to the image
+img.Image _applyColorMatrix(img.Image src, List<double> matrix) {
+  final out = img.Image(width: src.width, height: src.height);
+  for (int y = 0; y < src.height; y++) {
+    for (int x = 0; x < src.width; x++) {
+      final p = src.getPixel(x, y);
+      final r = p.r;
+      final g = p.g;
+      final b = p.b;
+      // matrix is 20 elements. 
+      // row 1: R
+      final newR = r * matrix[0] + g * matrix[1] + b * matrix[2] + 255 * matrix[3] + matrix[4];
+      // row 2: G
+      final newG = r * matrix[5] + g * matrix[6] + b * matrix[7] + 255 * matrix[8] + matrix[9];
+      // row 3: B
+      final newB = r * matrix[10] + g * matrix[11] + b * matrix[12] + 255 * matrix[13] + matrix[14];
+      
+      out.setPixelRgb(
+        x,
+        y,
+        newR.round().clamp(0, 255),
+        newG.round().clamp(0, 255),
+        newB.round().clamp(0, 255),
+      );
+    }
+  }
+  return out;
 }

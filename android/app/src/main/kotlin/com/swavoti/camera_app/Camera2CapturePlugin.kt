@@ -5,15 +5,20 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.hardware.camera2.*
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
+import android.media.DngCreator
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Build
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import java.io.ByteArrayOutputStream
 
 /**
  * Camera2CapturePlugin
@@ -60,6 +65,14 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
             "captureHighQuality" -> {
                 val cameraId = call.argument<String>("cameraId") ?: "0"
                 captureHighQuality(cameraId, result)
+            }
+            "captureDng" -> {
+                val cameraId = call.argument<String>("cameraId") ?: "0"
+                captureDng(cameraId, result)
+            }
+            "supportsRawCapture" -> {
+                val cameraId = call.argument<String>("cameraId") ?: "0"
+                supportsRawCapture(cameraId, result)
             }
             "playShutterSound" -> {
                 try {
@@ -382,6 +395,221 @@ class Camera2CapturePlugin : FlutterPlugin, MethodCallHandler {
 
                 override fun onError(device: CameraDevice, error: Int) {
                     result.error("CAMERA_ERROR", "Camera device error: $error", null)
+                    device.close()
+                    thread.quitSafely()
+                }
+            }, handler)
+
+        } catch (e: Exception) {
+            result.error("OPEN_ERROR", e.message, null)
+            thread.quitSafely()
+        }
+    }
+
+    // ── RAW / DNG capability check ────────────────────────────────────────────
+
+    /**
+     * Returns true if the camera hardware supports RAW_SENSOR capture.
+     */
+    private fun supportsRawCapture(cameraId: String, result: Result) {
+        try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(cameraId)
+            val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            val supportsRaw = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+
+            // Also verify there are RAW output sizes available
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val rawSizes = streamMap?.getOutputSizes(ImageFormat.RAW_SENSOR)
+            val hasRawSizes = rawSizes != null && rawSizes.isNotEmpty()
+
+            result.success(supportsRaw && hasRawSizes)
+        } catch (e: Exception) {
+            result.success(false)
+        }
+    }
+
+    // ── DNG (true RAW sensor) capture ─────────────────────────────────────────
+
+    /**
+     * Captures a true RAW_SENSOR frame via Camera2 and writes it to a DNG file
+     * using Android's built-in DngCreator.
+     *
+     * Returns a map with:
+     *   "dngBytes"  → ByteArray  (the full DNG file bytes)
+     *   "width"     → Int
+     *   "height"    → Int
+     *
+     * Falls back with an error if the device does not support RAW.
+     */
+    private fun captureDng(cameraId: String, result: Result) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            result.error("PERMISSION_DENIED", "Camera permission not granted", null)
+            return
+        }
+
+        val thread = HandlerThread("Camera2DngCapture").also { it.start() }
+        val handler = Handler(thread.looper)
+
+        try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val chars = manager.getCameraCharacteristics(cameraId)
+
+            // Verify RAW is supported
+            val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) {
+                result.error("RAW_NOT_SUPPORTED", "This device does not support RAW_SENSOR capture", null)
+                thread.quitSafely()
+                return
+            }
+
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+            val rawSizes = streamMap.getOutputSizes(ImageFormat.RAW_SENSOR)
+            if (rawSizes == null || rawSizes.isEmpty()) {
+                result.error("RAW_NOT_SUPPORTED", "No RAW_SENSOR output sizes available", null)
+                thread.quitSafely()
+                return
+            }
+
+            // Use the largest RAW size (full sensor readout)
+            val rawSize = rawSizes.maxByOrNull { it.width.toLong() * it.height.toLong() }!!
+            val rawReader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, 2)
+
+            // Shared capture result holder
+            var captureResult: TotalCaptureResult? = null
+            var rawImageBytes: ByteArray? = null
+            var rawWidth = 0
+            var rawHeight = 0
+
+            manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+
+                override fun onOpened(device: CameraDevice) {
+                    try {
+                        val outputs = listOf(rawReader.surface)
+
+                        device.createCaptureSession(outputs, object : CameraCaptureSession.StateCallback() {
+
+                            override fun onConfigured(session: CameraCaptureSession) {
+                                try {
+                                    val capture = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                                    capture.addTarget(rawReader.surface)
+
+                                    // Quality ISP settings
+                                    capture.set(CaptureRequest.CONTROL_CAPTURE_INTENT,
+                                        CameraMetadata.CONTROL_CAPTURE_INTENT_STILL_CAPTURE)
+                                    capture.set(CaptureRequest.CONTROL_AF_MODE,
+                                        CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                                    capture.set(CaptureRequest.CONTROL_AWB_MODE,
+                                        CameraMetadata.CONTROL_AWB_MODE_AUTO)
+                                    capture.set(CaptureRequest.CONTROL_MODE,
+                                        CameraMetadata.CONTROL_MODE_AUTO)
+
+                                    // RAW capture must use NOISE_REDUCTION_MODE_OFF for true raw
+                                    capture.set(CaptureRequest.NOISE_REDUCTION_MODE,
+                                        CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL)
+
+                                    // Set up the RAW image listener
+                                    rawReader.setOnImageAvailableListener({ reader ->
+                                        val image = reader.acquireLatestImage()
+                                        try {
+                                            if (image != null) {
+                                                val plane = image.planes[0]
+                                                val buffer = plane.buffer
+                                                val bytes = ByteArray(buffer.remaining())
+                                                buffer.get(bytes)
+                                                rawImageBytes = bytes
+                                                rawWidth = image.width
+                                                rawHeight = image.height
+                                            }
+                                        } finally {
+                                            image?.close()
+                                        }
+                                    }, handler)
+
+                                    // Capture with full metadata for DngCreator
+                                    session.capture(capture.build(), object : CameraCaptureSession.CaptureCallback() {
+                                        override fun onCaptureCompleted(
+                                            sess: CameraCaptureSession,
+                                            request: CaptureRequest,
+                                            totalResult: TotalCaptureResult
+                                        ) {
+                                            captureResult = totalResult
+
+                                            // Wait briefly for image listener to fill in rawImageBytes
+                                            handler.postDelayed({
+                                                val rawBytes = rawImageBytes
+                                                val cr = captureResult
+                                                if (rawBytes != null && cr != null) {
+                                                    try {
+                                                        val dngOut = ByteArrayOutputStream()
+                                                        val dngCreator = DngCreator(chars, cr)
+                                                        dngCreator.setOrientation(android.media.ExifInterface.ORIENTATION_NORMAL)
+                                                        // Write the raw sensor buffer directly using the DngCreator
+                                                        val rawBuf = java.nio.ByteBuffer.wrap(rawBytes)
+                                                        dngCreator.writeByteBuffer(dngOut, android.util.Size(rawWidth, rawHeight), rawBuf, 0)
+                                                        dngCreator.close()
+
+                                                        val dngBytes = dngOut.toByteArray()
+                                                        val response = mapOf(
+                                                            "dngBytes" to dngBytes,
+                                                            "width"    to rawWidth,
+                                                            "height"   to rawHeight
+                                                        )
+                                                        result.success(response)
+                                                    } catch (e: Exception) {
+                                                        result.error("DNG_ENCODE_ERROR", e.message, null)
+                                                    }
+                                                } else {
+                                                    result.error("RAW_TIMEOUT", "RAW image not received", null)
+                                                }
+                                                session.close()
+                                                device.close()
+                                                rawReader.close()
+                                                thread.quitSafely()
+                                            }, 1000L)
+                                        }
+
+                                        override fun onCaptureFailed(
+                                            sess: CameraCaptureSession,
+                                            request: CaptureRequest,
+                                            failure: CaptureFailure
+                                        ) {
+                                            result.error("CAPTURE_FAILED", "DNG capture failed: reason=${failure.reason}", null)
+                                            session.close()
+                                            device.close()
+                                            rawReader.close()
+                                            thread.quitSafely()
+                                        }
+                                    }, handler)
+
+                                } catch (e: Exception) {
+                                    result.error("CAPTURE_ERROR", e.message, null)
+                                    cleanup(session, device, rawReader, thread)
+                                }
+                            }
+
+                            override fun onConfigureFailed(session: CameraCaptureSession) {
+                                result.error("CONFIG_FAILED", "RAW CaptureSession config failed", null)
+                                device.close()
+                                rawReader.close()
+                                thread.quitSafely()
+                            }
+                        }, handler)
+                    } catch (e: Exception) {
+                        result.error("SESSION_ERROR", e.message, null)
+                        device.close()
+                        thread.quitSafely()
+                    }
+                }
+
+                override fun onDisconnected(device: CameraDevice) {
+                    device.close()
+                    thread.quitSafely()
+                }
+
+                override fun onError(device: CameraDevice, error: Int) {
+                    result.error("CAMERA_ERROR", "Camera error: $error", null)
                     device.close()
                     thread.quitSafely()
                 }
