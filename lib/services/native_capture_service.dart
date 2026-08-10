@@ -88,30 +88,16 @@ class HardwareVideoCaps {
   String get displayCapsText => '$maxResolution @ ${maxFps}fps';
 }
 
-/// Result from a native DNG capture.
-class DngCaptureResult {
-  final Uint8List dngBytes;
-  final int width;
-  final int height;
-
-  const DngCaptureResult({
-    required this.dngBytes,
-    required this.width,
-    required this.height,
-  });
-}
-
 /// Bridges to [Camera2CapturePlugin] on Android.
 ///
 /// Usage pattern:
 ///   1. Dispose the Flutter CameraController (frees the camera hardware).
-///   2. Call [captureHighQuality] or [captureDng] — Camera2 opens, captures, closes.
+///   2. Call [captureHighQuality] — Camera2 opens, captures, closes.
 ///   3. Recreate the CameraController (preview resumes).
 class NativeCaptureService {
   static const _channel = MethodChannel('com.swavoti.camera/camera2');
 
   static IspFeatures? _cachedFeatures;
-  static bool? _cachedRawSupport;
   static final Map<String, HardwareVideoCaps> _videoCapsCache = {};
 
   /// Query hardware video capabilities for the specified camera (front vs back).
@@ -194,46 +180,4 @@ class NativeCaptureService {
     }
   }
 
-  /// Checks if the camera hardware supports true RAW_SENSOR / DNG capture.
-  /// Result is cached after the first call.
-  static Future<bool> supportsRawCapture({String cameraId = '0'}) async {
-    if (_cachedRawSupport != null) return _cachedRawSupport!;
-    try {
-      final supported = await _channel.invokeMethod<bool>(
-        'supportsRawCapture',
-        {'cameraId': cameraId},
-      );
-      _cachedRawSupport = supported ?? false;
-    } catch (e) {
-      debugPrint('supportsRawCapture error: $e');
-      _cachedRawSupport = false;
-    }
-    return _cachedRawSupport!;
-  }
-
-  /// Opens Camera2, captures a true RAW_SENSOR frame, and returns it encoded
-  /// as a DNG file using Android's built-in DngCreator.
-  ///
-  /// The caller MUST have disposed the Flutter CameraController first.
-  /// Returns null if the device does not support RAW capture, in which case
-  /// [captureHighQuality] (JPEG) should be used as fallback.
-  static Future<DngCaptureResult?> captureDng({String cameraId = '0'}) async {
-    try {
-      final raw = await _channel.invokeMethod<Map<Object?, Object?>>(
-        'captureDng',
-        {'cameraId': cameraId},
-      );
-      if (raw == null) return null;
-      final dngBytes = raw['dngBytes'];
-      if (dngBytes == null) return null;
-      return DngCaptureResult(
-        dngBytes: dngBytes is Uint8List ? dngBytes : Uint8List.fromList((dngBytes as List).cast<int>()),
-        width: (raw['width'] as int?) ?? 0,
-        height: (raw['height'] as int?) ?? 0,
-      );
-    } on PlatformException catch (e) {
-      debugPrint('captureDng error: ${e.code} — ${e.message}');
-      return null;
-    }
-  }
 }

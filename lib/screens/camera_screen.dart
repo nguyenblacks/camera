@@ -95,9 +95,6 @@ class _CameraScreenState extends State<CameraScreen>
   bool _showFilterCarousel = false;
   bool _showTimelapseSettings = false;
 
-  // DNG support
-  bool _supportsRawCapture = false;
-
   static List<double>? _presetToMatrix(ColorFiltersPreset? preset) {
     if (preset == null || preset.filters.isEmpty) return null;
     return ColorFilterExt.merged(preset.filters).matrix;
@@ -164,11 +161,6 @@ class _CameraScreenState extends State<CameraScreen>
 
       final isp = await NativeCaptureService.getSupportedFeatures();
       debugPrint('Device ISP features: $isp');
-
-      // Check if device supports true RAW/DNG capture (Camera2 RAW_SENSOR)
-      final rawSupported = await NativeCaptureService.supportsRawCapture();
-      if (mounted) setState(() => _supportsRawCapture = rawSupported);
-      debugPrint('DNG/RAW capture supported: $rawSupported');
 
       await _setupController(
         _settings.isFrontCamera
@@ -389,40 +381,7 @@ class _CameraScreenState extends State<CameraScreen>
     HapticFeedback.heavyImpact();
 
     try {
-      // ── Try true RAW/DNG capture first (rear camera only) ──────────────────
-      if (_supportsRawCapture && !_settings.isFrontCamera) {
-        final cameraId = '0';
-
-        // Must release the Flutter controller first so Camera2 can open
-        await _controller!.dispose();
-        _controller = null;
-
-        final dngResult = await NativeCaptureService.captureDng(cameraId: cameraId);
-
-        // Reinitialise the Flutter preview immediately after
-        final cam = _cameras.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.back,
-          orElse: () => _cameras.first,
-        );
-        await _setupController(cam);
-
-        if (dngResult != null) {
-          if (mounted) {
-            setState(() {
-              _thumbnailBytes = dngResult.dngBytes;
-              _thumbnailState = ThumbnailState.processing;
-            });
-          }
-          // Save DNG directly — no JPEG processing pipeline
-          await _saveToGallery(dngResult.dngBytes, isDng: true);
-          _finishProcessing(dngResult.dngBytes);
-          return;
-        }
-        // If DNG failed, fall through to JPEG path below
-        debugPrint('DNG capture failed, falling back to JPEG');
-      }
-
-      // ── JPEG path (front camera, or DNG not supported/failed) ─────────────
+      // ── JPEG path ─────────────────────────────────────────────────────────
       final XFile f1 = await _controller!.takePicture();
       final Uint8List raw1 = await f1.readAsBytes();
       try { File(f1.path).deleteSync(); } catch (_) {}
@@ -637,15 +596,13 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _saveToGallery(Uint8List bytes, {bool isDng = false}) async {
+  Future<void> _saveToGallery(Uint8List bytes) async {
     try {
       final dir = await getTemporaryDirectory();
       final ts = DateTime.now().millisecondsSinceEpoch;
-      final ext = isDng ? 'dng' : 'jpg';
-      final path = '${dir.path}/swavoti_$ts.$ext';
+      final path = '${dir.path}/swavoti_$ts.jpg';
       await File(path).writeAsBytes(bytes);
       _lastSavedFilePath = path;
-      // Gal.putImage supports DNG as well as JPEG on Android
       await Gal.putImage(path, album: 'Swavoti Camera');
     } catch (e) {
       debugPrint('Save error: $e');
